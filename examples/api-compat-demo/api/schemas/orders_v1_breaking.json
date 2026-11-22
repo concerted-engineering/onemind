@@ -1,0 +1,25 @@
+{
+  "title": "Public Orders API v1 Proposed Schema (BREAKING CHANGE)",
+  "version": "1.1.0-breaking-candidate",
+  "endpoints": {
+    "GET /v1/orders/{order_id}": {
+      "response": {
+        "type": "object",
+        "required": ["order_id", "status", "total_cents", "customer"],
+        "properties": {
+          "order_id": { "type": "string" },
+          "status": { "type": "string", "enum": ["pending", "paid", "shipped", "cancelled"] },
+          "total_cents": { "type": "string" },
+          "customer": {
+            "type": "object",
+            "required": [],
+            "properties": {
+              "customer_id": { "type": "string" },
+              "loyalty_tier": { "type": "string", "nullable": true }
+            }
+          }
+        }
+      }
+    }
+  }
+}

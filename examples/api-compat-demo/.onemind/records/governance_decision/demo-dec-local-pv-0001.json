@@ -1,0 +1,26 @@
+{
+  "actor": {
+    "id": "local-developer",
+    "type": "human"
+  },
+  "body": {
+    "action": "approve",
+    "authority": {
+      "mode": "local-owner-assertion",
+      "subject": "local-developer"
+    },
+    "effective_at": "2026-11-20T00:00:00Z",
+    "proof": {
+      "type": "local-owner-assertion",
+      "verified_repository_approval": false
+    },
+    "rationale": "Local developer assertion for offline advisory demonstration only; NOT externally verified repository approval.",
+    "target_kind": "practice_version",
+    "target_record_id": "demo-pv-0001",
+    "target_sha256": "8a3a575a13586f56444747d4263aff1e4ff07a7c0f1769ee183dc8d446e91696"
+  },
+  "created_at": "2026-11-20T00:00:00Z",
+  "kind": "governance_decision",
+  "record_id": "demo-dec-local-pv-0001",
+  "schema_version": "0.1-draft"
+}

@@ -1,0 +1,25 @@
+{
+  "observation_schema": "structured-observation/v1",
+  "synthetic": true,
+  "description": "Synthetic structured JSON engineering observation fixture for OneMind adapter composability tests.",
+  "observations": [
+    {
+      "id": "obs-db-timeout-001",
+      "observed_at": "2026-11-19T15:30:00Z",
+      "reporter": "incident-review-bot",
+      "category": "reliability",
+      "paths": ["services/billing/**"],
+      "summary": "Outbound HTTP clients in billing services MUST configure explicit connect and read timeouts.",
+      "approved": true,
+      "auto_activate": true
+    },
+    {
+      "id": "obs-log-pii-002",
+      "observed_at": "2026-11-19T16:10:00Z",
+      "reporter": "security-review-export",
+      "category": "privacy",
+      "paths": ["services/**"],
+      "summary": "Structured log fields MUST NOT serialize raw authorization headers or bearer tokens."
+    }
+  ]
+}

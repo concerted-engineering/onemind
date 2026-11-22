@@ -1,0 +1,223 @@
+[
+  {
+    "schema_version": "0.1-draft",
+    "record_id": "fixture-0001",
+    "kind": "evidence",
+    "created_at": "2026-11-20T00:00:00Z",
+    "actor": {
+      "type": "human",
+      "id": "local-developer"
+    },
+    "body": {
+      "source_type": "local-file",
+      "source_uri": "repo://docs/adr/api-compat.md#L12",
+      "source_id": "docs/adr/api-compat.md:12",
+      "source_revision": "fixture-commit-a",
+      "observed_at": "2026-11-20T00:00:00Z",
+      "source_author": "repo-maintainer",
+      "excerpt_sha256": "5f52e339fea20e2d5af9629bc0651f1951ea62def57a266f1698dfc0479bff1f",
+      "source_state": "available",
+      "redacted_snapshot": "Public API responses must preserve established fields."
+    }
+  },
+  {
+    "schema_version": "0.1-draft",
+    "record_id": "fixture-0002",
+    "kind": "practice_candidate",
+    "created_at": "2026-11-20T00:00:00Z",
+    "actor": {
+      "type": "human",
+      "id": "local-developer"
+    },
+    "body": {
+      "statement": "Public API response fields must not be removed without a compatibility review.",
+      "proposed_scope": {
+        "repository": "sample/api-compat-demo",
+        "paths": [
+          "api/**"
+        ],
+        "languages": [
+          "python"
+        ]
+      },
+      "evidence_ids": [
+        "fixture-0001"
+      ],
+      "generator": {
+        "name": "manual-capture",
+        "version": "0.1"
+      }
+    }
+  },
+  {
+    "schema_version": "0.1-draft",
+    "record_id": "fixture-0003",
+    "kind": "practice_version",
+    "created_at": "2026-11-20T00:00:00Z",
+    "actor": {
+      "type": "human",
+      "id": "local-developer"
+    },
+    "body": {
+      "practice_id": "sample-practice-api-compat",
+      "version": 1,
+      "statement": "Public API response fields must not be removed without a compatibility review.",
+      "scope": {
+        "repository": "sample/api-compat-demo",
+        "paths": [
+          "api/**"
+        ],
+        "languages": [
+          "python"
+        ]
+      },
+      "owner": "repo-maintainer",
+      "evidence_ids": [
+        "fixture-0001"
+      ],
+      "candidate_id": "fixture-0002",
+      "previous_version_id": null,
+      "exceptions": []
+    }
+  },
+  {
+    "schema_version": "0.1-draft",
+    "record_id": "fixture-0004",
+    "kind": "governance_decision",
+    "created_at": "2026-11-20T00:00:00Z",
+    "actor": {
+      "type": "human",
+      "id": "local-developer"
+    },
+    "body": {
+      "target_record_id": "fixture-0003",
+      "target_kind": "practice_version",
+      "action": "approve",
+      "target_sha256": "27e5e2b9b6f1369d0ed6e3b99a72f0bb2f9db40f65f0523867134dac95b6bb88",
+      "effective_at": "2026-11-20T00:00:00Z",
+      "authority": {
+        "mode": "local-owner-assertion",
+        "subject": "repo-maintainer"
+      },
+      "proof": {
+        "type": "local-owner-assertion",
+        "verified_repository_approval": false
+      }
+    }
+  },
+  {
+    "schema_version": "0.1-draft",
+    "record_id": "fixture-0005",
+    "kind": "application",
+    "created_at": "2026-11-20T00:00:00Z",
+    "actor": {
+      "type": "human",
+      "id": "local-developer"
+    },
+    "body": {
+      "application_id": "sample-api-check",
+      "application_version": 1,
+      "practice_version_id": "fixture-0003",
+      "route": "preflight",
+      "applicability": {
+        "repository": "sample/api-compat-demo",
+        "paths": [
+          "api/**"
+        ],
+        "languages": [
+          "python"
+        ]
+      },
+      "detection": {
+        "description": "Detect removals in JSON response fixture",
+        "implementation": "demo/check_api.py",
+        "version": "0.1",
+        "inputs": [
+          "fixtures/base.json",
+          "fixtures/proposed.json"
+        ],
+        "fixtures": [
+          "api-field-removed",
+          "api-field-retained"
+        ],
+        "known_limitations": [
+          "Does not prove runtime API compatibility."
+        ]
+      }
+    }
+  },
+  {
+    "schema_version": "0.1-draft",
+    "record_id": "fixture-0006",
+    "kind": "governance_decision",
+    "created_at": "2026-11-20T00:00:00Z",
+    "actor": {
+      "type": "human",
+      "id": "local-developer"
+    },
+    "body": {
+      "target_record_id": "fixture-0005",
+      "target_kind": "application",
+      "action": "approve",
+      "target_sha256": "35fe0c5622a9806b263e33fb717738fb0840df605912463d88a9d6129015e622",
+      "effective_at": "2026-11-20T00:00:00Z",
+      "authority": {
+        "mode": "local-owner-assertion",
+        "subject": "repo-maintainer"
+      },
+      "proof": {
+        "type": "local-owner-assertion",
+        "verified_repository_approval": false
+      }
+    }
+  },
+  {
+    "schema_version": "0.1-draft",
+    "record_id": "fixture-0007",
+    "kind": "outcome_event",
+    "created_at": "2026-11-20T00:00:00Z",
+    "actor": {
+      "type": "service",
+      "id": "example-reporter"
+    },
+    "body": {
+      "event_type": "alert",
+      "repo_id": "sample/api-compat-demo",
+      "pr_id": "synthetic-1",
+      "head_sha": "fixture-commit-b",
+      "practice_version_id": "fixture-0003",
+      "application_record_id": "fixture-0005",
+      "checker_version": "0.1",
+      "observed_at": "2026-11-20T00:00:00Z",
+      "dedup_key": "synthetic-1:fixture-0005:fixture-commit-b:0.1",
+      "details": {
+        "synthetic": true,
+        "finding": "removed response field",
+        "experiment": false
+      }
+    }
+  },
+  {
+    "schema_version": "0.1-draft",
+    "record_id": "fixture-0008",
+    "kind": "conflict",
+    "created_at": "2026-11-20T00:00:00Z",
+    "actor": {
+      "type": "service",
+      "id": "example-reporter"
+    },
+    "body": {
+      "left_record_id": "fixture-0002",
+      "right_record_id": "fixture-0003",
+      "relation": "possible-exception",
+      "evidence_ids": [
+        "fixture-0001"
+      ],
+      "detector": {
+        "name": "example-fixture",
+        "version": "0.1"
+      },
+      "rationale": "Illustrates a non-activating finding, not a meaningful production conflict."
+    }
+  }
+]

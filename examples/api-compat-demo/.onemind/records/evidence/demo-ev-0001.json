@@ -1,0 +1,20 @@
+{
+  "actor": {
+    "id": "api-platform-maintainer",
+    "type": "human"
+  },
+  "body": {
+    "excerpt_sha256": "24dadf9ff8162861fcfbe4885bd92a3da96307c26d6633149fe243ca8b002cdf",
+    "observed_at": "2026-11-20T00:00:00Z",
+    "redacted_snapshot": "Public API response schemas MUST NOT remove established fields or change existing field types incompatibly within a major API version.",
+    "source_author": "api-platform-maintainers",
+    "source_id": "docs/adr/0001-public-api-response-compatibility.md:14",
+    "source_state": "available",
+    "source_type": "local-file",
+    "source_uri": "repo://docs/adr/0001-public-api-response-compatibility.md#L14"
+  },
+  "created_at": "2026-11-20T00:00:00Z",
+  "kind": "evidence",
+  "record_id": "demo-ev-0001",
+  "schema_version": "0.1-draft"
+}

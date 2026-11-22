@@ -1,0 +1,31 @@
+{
+  "actor": {
+    "id": "onemind-demo-fixture",
+    "type": "service"
+  },
+  "body": {
+    "application_record_id": "demo-app-0001",
+    "checker_version": "0.1.0",
+    "dedup_key": "synthetic-demo-pr-1:demo-app-0001:synthetic-breaking-revision:0.1.0",
+    "details": {
+      "experiment": false,
+      "finding_codes": [
+        "API_FIELD_REMOVED",
+        "API_FIELD_TYPE_CHANGED",
+        "API_REQUIRED_FIELD_DROPPED"
+      ],
+      "note": "Synthetic demo fixture only; not an empirical engineering effectiveness measurement.",
+      "synthetic": true
+    },
+    "event_type": "alert",
+    "head_sha": "synthetic-breaking-revision",
+    "observed_at": "2026-11-20T00:00:00Z",
+    "pr_id": "synthetic-demo-pr-1",
+    "practice_version_id": "demo-pv-0001",
+    "repo_id": "examples/api-compat-demo"
+  },
+  "created_at": "2026-11-20T00:00:00Z",
+  "kind": "outcome_event",
+  "record_id": "demo-out-0001",
+  "schema_version": "0.1-draft"
+}

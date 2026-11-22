@@ -1,0 +1,42 @@
+{
+  "actor": {
+    "id": "api-platform-maintainer",
+    "type": "human"
+  },
+  "body": {
+    "applicability": {
+      "languages": [
+        "json"
+      ],
+      "paths": [
+        "api/schemas/**"
+      ],
+      "repository": "examples/api-compat-demo"
+    },
+    "application_id": "orders-api-compat-check",
+    "application_version": 1,
+    "detection": {
+      "description": "Compare baseline and proposed JSON response schemas for breaking removals, type changes, or required-field downgrades.",
+      "fixtures": [
+        "api/schemas/orders_v1_breaking.json",
+        "api/schemas/orders_v1_compatible.json"
+      ],
+      "implementation": "builtin:api-compat-json",
+      "inputs": [
+        "api/schemas/orders_v1_baseline.json",
+        "api/schemas/orders_v1_breaking.json"
+      ],
+      "known_limitations": [
+        "Does not execute application code or prove runtime HTTP serialization matches the schema.",
+        "Does not verify semantic changes when field names and JSON types remain unchanged."
+      ],
+      "version": "0.1.0"
+    },
+    "practice_version_id": "demo-pv-0001",
+    "route": "preflight"
+  },
+  "created_at": "2026-11-20T00:00:00Z",
+  "kind": "application",
+  "record_id": "demo-app-0001",
+  "schema_version": "0.1-draft"
+}

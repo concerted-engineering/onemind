@@ -1,0 +1,29 @@
+{
+  "actor": {
+    "id": "api-platform-maintainer",
+    "type": "human"
+  },
+  "body": {
+    "evidence_ids": [
+      "demo-ev-0001"
+    ],
+    "generator": {
+      "name": "manual-capture",
+      "version": "0.1.0"
+    },
+    "proposed_scope": {
+      "languages": [
+        "json"
+      ],
+      "paths": [
+        "api/schemas/**"
+      ],
+      "repository": "examples/api-compat-demo"
+    },
+    "statement": "Public /v1/orders API response schemas must not remove established fields, downgrade required fields, or change field types incompatibly."
+  },
+  "created_at": "2026-11-20T00:00:00Z",
+  "kind": "practice_candidate",
+  "record_id": "demo-cand-0001",
+  "schema_version": "0.1-draft"
+}

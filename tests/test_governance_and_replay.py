@@ -70,8 +70,8 @@ def test_local_owner_assertion_never_activates_under_strict_policy() -> None:
     )
     res_strict = resolve_context(strict_state, ctx)
     assert res_strict.state == ResolutionState.NONE
-    assert res_strict.practices == []
-    assert res_strict.applications == []
+    assert res_strict.practices == ()
+    assert res_strict.applications == ()
 
     # Explicit local advisory policy: activates ONLY as local-owner-assertion
     local_policy = AuthorityPolicy(allow_local_assertions=True)
@@ -176,8 +176,8 @@ def test_suspend_application_does_not_suspend_practice_but_retire_practice_inval
         project_effective_state(records, as_of="2026-11-20T09:00:00Z", policy=policy), ctx
     )
     assert r_09.state == ResolutionState.NONE
-    assert r_09.practices == []
-    assert r_09.applications == []
+    assert r_09.practices == ()
+    assert r_09.applications == ()
 
 
 def test_candidate_conflict_never_disables_approved_practice() -> None:
@@ -307,3 +307,81 @@ def test_engine_logical_operations_query_propose_resolve_observe() -> None:
     obs2 = engine.observe(ev)
     assert obs2.appended is False
     assert obs2.deduplicated is True
+
+
+def test_top_level_immutable_api_and_fail_closed_ambiguous_applicability() -> None:
+    import pytest
+
+    from onemind import QueryCriteria, ResolutionContext, observe, propose, query, resolve
+
+    records = _fixture_records()[:6]
+    store = InMemoryStore(records)
+    policy = AuthorityPolicy(allow_local_assertions=True)
+
+    # 1. query() returns deeply immutable records
+    q = query(store, QueryCriteria(kinds=("practice_version",)), as_of="2026-11-21T00:00:00Z", policy=policy)
+    assert isinstance(q.records, tuple)
+    assert len(q.records) == 1
+    with pytest.raises(TypeError):
+        q.records[0].record.body["statement"] = "mutated"  # type: ignore[index]
+
+    # 2. resolve() returns deeply immutable practices & applications
+    res = resolve(
+        store,
+        ResolutionContext(
+            repository="sample/api-compat-demo",
+            paths=("api/v1.py",),
+            languages=("python",),
+        ),
+        as_of="2026-11-21T00:00:00Z",
+        policy=policy,
+    )
+    assert res.state == ResolutionState.ACTIVE
+    assert isinstance(res.practices, tuple)
+    with pytest.raises(TypeError):
+        res.practices[0].scope["repository"] = "hijacked"  # type: ignore[index]
+
+    # 3. Fail closed when practice scope contains unrecognized constraint key
+    amb_records = copy.deepcopy(records[:4])
+    amb_records[2]["body"]["scope"]["unknown_constraint"] = "custom-eval"
+    amb_records[3]["body"]["target_sha256"] = canonical_sha256(amb_records[2])
+    amb_store = InMemoryStore(amb_records)
+    res_amb = resolve(
+        amb_store,
+        ResolutionContext(repository="sample/api-compat-demo", paths=("api/v1.py",), languages=("python",)),
+        as_of="2026-11-21T00:00:00Z",
+        policy=policy,
+    )
+    assert res_amb.state == ResolutionState.AMBIGUOUS
+
+    # 4. Fail closed on simultaneous conflicting governance decisions without ledger order
+    pv = records[2]
+    d_approve = _make_verified_decision(
+        record_id="d-sim-a", target=pv, action="approve", effective_at="2026-11-20T01:00:00Z", reviewer="alice"
+    )
+    d_suspend = _make_verified_decision(
+        record_id="d-sim-s", target=pv, action="suspend", effective_at="2026-11-20T01:00:00Z", reviewer="alice"
+    )
+    strict_pol = AuthorityPolicy(authorized_reviewers=frozenset({"alice"}))
+    eff_sim = project_effective_state(
+        [records[0], records[1], pv, d_approve, d_suspend],
+        as_of="2026-11-21T00:00:00Z",
+        policy=strict_pol,
+    )
+    res_sim = resolve_context(
+        eff_sim,
+        {"repository": "sample/api-compat-demo", "paths": ["api/v1.py"], "languages": ["python"]},
+    )
+    assert res_sim.state == ResolutionState.AMBIGUOUS
+
+    # 5. propose() and observe() top-level immutable calls
+    new_cand = copy.deepcopy(records[1])
+    new_cand["record_id"] = "cand-top-1"
+    prop = propose(store, new_cand, write=True)
+    assert prop.written is True
+    assert isinstance(prop.written_record_ids, tuple)
+    with pytest.raises(TypeError):
+        prop.candidate["kind"] = "practice_version"  # type: ignore[index]
+
+    obs = observe(store, _fixture_records()[6])
+    assert obs.appended is True

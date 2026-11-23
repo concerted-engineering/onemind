@@ -1,6 +1,8 @@
 """OneMind v0.1-draft record protocol package."""
 
 from onemind.protocol.canonical import (
+    MAX_SAFE_IEEE754_INT,
+    CanonicalizationError,
     canonical_bytes,
     canonical_sha256,
     canonicalize_json,
@@ -16,36 +18,46 @@ from onemind.protocol.models import (
     AuthorityClass,
     ConflictRelation,
     GovernanceAction,
+    ImmutableRecord,
     RecordDict,
     RecordKind,
     ResolutionState,
+    freeze_value,
     generate_record_id,
     is_safe_record_id,
     is_valid_rfc3339,
     make_envelope,
     parse_rfc3339,
+    unfreeze_value,
     utc_now_iso,
 )
 from onemind.protocol.schema import SchemaError, load_record_schema, validate_record_schema
 from onemind.protocol.scope import (
+    KNOWN_SCOPE_KEYS,
+    evaluate_scope_applicability,
     is_scope_subset,
     normalize_rel_path,
     path_matches_glob,
     scope_matches_context,
     scopes_may_overlap,
+    validate_scope_structure,
 )
 from onemind.protocol.validator import ValidationIssue, ValidationReport, validate_records
 
 __all__ = [
     "ALL_RECORD_KINDS",
     "COMPUTATION_VERSION",
+    "KNOWN_SCOPE_KEYS",
+    "MAX_SAFE_IEEE754_INT",
     "PROTOCOL_STATUS",
     "SCHEMA_VERSION",
     "ActorType",
     "AdjudicationDisposition",
     "AuthorityClass",
+    "CanonicalizationError",
     "ConflictRelation",
     "GovernanceAction",
+    "ImmutableRecord",
     "RecordDict",
     "RecordKind",
     "ResolutionState",
@@ -55,7 +67,9 @@ __all__ = [
     "canonical_bytes",
     "canonical_sha256",
     "canonicalize_json",
+    "evaluate_scope_applicability",
     "excerpt_sha256",
+    "freeze_value",
     "generate_record_id",
     "is_safe_record_id",
     "is_scope_subset",
@@ -67,7 +81,9 @@ __all__ = [
     "path_matches_glob",
     "scope_matches_context",
     "scopes_may_overlap",
+    "unfreeze_value",
     "utc_now_iso",
     "validate_record_schema",
     "validate_records",
+    "validate_scope_structure",
 ]

@@ -18,26 +18,24 @@ from typing import Any
 
 from onemind import __version__
 from onemind.adapters.local_files import (
+    CAPTURE_MODE_LEGEND,
     DEFAULT_MAX_FILE_BYTES,
-    _extract_normative_statements,
     _is_within_root,
+    inspect_source_lines,
+    parse_source_spec,
     scan_repository,
 )
+from onemind.api import propose_from_source
 from onemind.checks.registry import list_builtin_checkers, resolve_checker
-from onemind.engine import OneMindEngine
 from onemind.governance.policy import load_policy
 from onemind.governance.projection import project_effective_state
 from onemind.protocol.canonical import canonical_sha256, excerpt_sha256
 from onemind.protocol.models import (
     PROTOCOL_STATUS,
     SCHEMA_VERSION,
-    ActorType,
     AuthorityClass,
     RecordDict,
     RecordKind,
-    generate_record_id,
-    make_envelope,
-    utc_now_iso,
 )
 from onemind.protocol.validator import ValidationIssue, validate_records
 from onemind.storage.base import StoreError
@@ -121,7 +119,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     )
     print(
         f"Statements: {len(report.candidate_statements)} heuristic normative statement(s) "
-        "(all unverified source evidence)"
+        "(capture_mode=heuristic-scan; unverified source evidence)"
     )
 
     if report.sources:
@@ -129,18 +127,30 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         for item in report.sources:
             digest = item.excerpt_sha256[:12] if item.excerpt_sha256 else "n/a"
             stmt_cnt = item.metadata.get("candidate_statement_count", 0)
+            lines_rng = (
+                f"L{item.line_start}-L{item.line_end}"
+                if item.line_start is not None and item.line_end is not None
+                else "n/a"
+            )
             print(
-                f"  - [{item.source_type}] {item.source_id} "
-                f"(state={item.source_state}, sha256={digest}, statements={stmt_cnt}, author={item.source_author})"
+                f"  - [{item.source_type}] {item.source_id} ({lines_rng}, "
+                f"state={item.source_state}, sha256={digest}, statements={stmt_cnt}, author={item.source_author})"
             )
 
     if report.candidate_statements:
-        print("\nSample heuristic statements (unverified — not active practices):")
+        print("\nPer-line heuristic statements (heuristic-scan, unverified — NOT active practices):")
         for stmt in report.candidate_statements[:10]:
-            preview = stmt.text if len(stmt.text) <= 100 else stmt.text[:97] + "..."
-            print(f"  - {stmt.source_path}:{stmt.line_number}: {preview}")
+            preview = stmt.text if len(stmt.text) <= 90 else stmt.text[:87] + "..."
+            print(
+                f"  - {stmt.source_path}:{stmt.line_number} "
+                f"[{stmt.matched_signal}, sha256={stmt.excerpt_sha256[:12]}]: {preview}"
+            )
         if len(report.candidate_statements) > 10:
             print(f"  ... and {len(report.candidate_statements) - 10} more (use --json for full list)")
+
+    print("\nCapture-mode distinction:")
+    print(f"  * heuristic-scan:   {CAPTURE_MODE_LEGEND['heuristic-scan']}")
+    print(f"  * explicit-capture: {CAPTURE_MODE_LEGEND['explicit-capture']}")
 
     if report.existing_store_summary.get("present"):
         print(
@@ -160,80 +170,113 @@ def _cmd_scan(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 # Subcommand: inspect
 # ---------------------------------------------------------------------------
-def _parse_source_spec(target: str) -> tuple[str, int | None, int | None]:
-    """Parse `path/to/file.md[:line[-end]]` without breaking Windows-like colons."""
-    if ":" not in target:
-        return target, None, None
-    path_part, line_part = target.rsplit(":", 1)
-    if "-" in line_part:
-        a, b = line_part.split("-", 1)
-        if a.isdigit() and b.isdigit():
-            return path_part, int(a), int(b)
-    elif line_part.isdigit():
-        num = int(line_part)
-        return path_part, num, num
-    return target, None, None
+def _detect_record_capture_mode(rec: RecordDict) -> str:
+    kind = rec.get("kind")
+    ext_mode = rec.get("extensions", {}).get("source_provenance", {}).get("capture_mode")
+    if isinstance(ext_mode, str):
+        return ext_mode
+    if kind == RecordKind.PRACTICE_CANDIDATE:
+        gen = rec.get("body", {}).get("generator", {})
+        if isinstance(gen.get("capture_mode"), str):
+            return str(gen["capture_mode"])
+        if gen.get("name") in ("manual-capture", "onemind-cli-propose", "onemind-explicit-capture"):
+            return "explicit-capture"
+        return f"adapter:{gen.get('name', 'unknown')}"
+    if kind == RecordKind.EVIDENCE:
+        src_type = rec.get("body", {}).get("source_type")
+        if src_type == "local-file":
+            return "explicit-capture" if rec.get("actor", {}).get("type") == "human" else "heuristic-scan"
+        return f"adapter:{src_type}"
+    return "governed-record"
+
+
+def _check_live_source_drift(repo_root: Path, ev_body: dict[str, Any]) -> dict[str, Any]:
+    """Read-only check whether a local-file Evidence excerpt still matches current disk content."""
+    if ev_body.get("source_type") != "local-file":
+        return {"status": "not-applicable", "reason": "Non-local-file evidence source."}
+    source_id = str(ev_body.get("source_id", ""))
+    if not source_id:
+        return {"status": "not-checked", "reason": "Missing source_id."}
+    try:
+        info = inspect_source_lines(repo_root, source_id)
+    except (FileNotFoundError, ValueError, OSError) as exc:
+        return {"status": "source-unavailable-on-disk", "reason": str(exc)}
+
+    disk_sha = excerpt_sha256(str(info["excerpt"]))
+    recorded_sha = str(ev_body.get("excerpt_sha256", ""))
+    if disk_sha == recorded_sha:
+        return {"status": "matches-disk", "disk_sha256": disk_sha}
+    return {
+        "status": "source-drifted",
+        "recorded_sha256": recorded_sha,
+        "disk_sha256": disk_sha,
+        "reason": "Current source line(s) on disk differ from recorded evidence excerpt_sha256.",
+    }
 
 
 def _inspect_source_file(
     repo_root: Path,
-    rel_or_abs: str,
-    line_start: int | None,
-    line_end: int | None,
+    source_spec: str,
     records: list[RecordDict],
 ) -> dict[str, Any]:
-    candidate = Path(rel_or_abs)
-    abs_path = candidate if candidate.is_absolute() else (repo_root / candidate)
-    if ".." in Path(rel_or_abs).parts or not _is_within_root(repo_root, abs_path):
-        raise ValueError(f"Source path {rel_or_abs!r} escapes repository root {repo_root}.")
-    if not abs_path.is_file():
-        raise FileNotFoundError(f"Source file not found: {abs_path}")
+    info = inspect_source_lines(repo_root, source_spec)
+    rel_posix = str(info["source_path"])
 
-    rel_posix = abs_path.resolve().relative_to(repo_root).as_posix()
-    text = abs_path.read_text(encoding="utf-8")
-    lines = text.splitlines()
-
-    if line_start is not None:
-        end = line_end if line_end is not None else line_start
-        if line_start < 1 or end < line_start or end > len(lines):
-            raise ValueError(
-                f"Line range {line_start}-{end} out of bounds for {rel_posix} ({len(lines)} lines)."
+    linked_evidence: list[dict[str, Any]] = []
+    linked_ev_ids: set[str] = set()
+    for r in records:
+        if r.get("kind") != RecordKind.EVIDENCE:
+            continue
+        eb = r.get("body", {})
+        if str(eb.get("source_id", "")).startswith(rel_posix) or rel_posix in str(
+            eb.get("source_uri", "")
+        ):
+            rid = str(r["record_id"])
+            linked_ev_ids.add(rid)
+            linked_evidence.append(
+                {
+                    "record_id": rid,
+                    "source_uri": eb.get("source_uri"),
+                    "capture_mode": _detect_record_capture_mode(r),
+                    "excerpt_sha256": eb.get("excerpt_sha256"),
+                }
             )
-        excerpt = "\n".join(lines[line_start - 1 : end])
-    else:
-        excerpt = text
 
-    stmts, owner = _extract_normative_statements(rel_posix, text)
-
-    linked_evidence = [
-        r["record_id"]
+    linked_candidates = [
+        {
+            "record_id": r["record_id"],
+            "statement": r["body"]["statement"],
+            "capture_mode": _detect_record_capture_mode(r),
+            "authority_class": AuthorityClass.INERT_CANDIDATE.value,
+        }
         for r in records
-        if r.get("kind") == RecordKind.EVIDENCE
-        and (
-            str(r.get("body", {}).get("source_id", "")).startswith(rel_posix)
-            or rel_posix in str(r.get("body", {}).get("source_uri", ""))
-        )
+        if r.get("kind") == RecordKind.PRACTICE_CANDIDATE
+        and any(eid in linked_ev_ids for eid in r.get("body", {}).get("evidence_ids", []))
     ]
 
     return {
         "target_type": "source-document",
         "source_path": rel_posix,
-        "source_uri": (
-            f"repo://{rel_posix}#L{line_start}" if line_start is not None else f"repo://{rel_posix}"
-        ),
-        "line_start": line_start or 1,
-        "line_end": line_end or len(lines),
-        "file_sha256": excerpt_sha256(text),
-        "excerpt_sha256": excerpt_sha256(excerpt),
-        "excerpt": excerpt,
-        "owner": owner or "unspecified",
+        "source_uri": info["source_uri"],
+        "line_start": info["line_start"],
+        "line_end": info["line_end"],
+        "file_sha256": info["file_sha256"],
+        "excerpt_sha256": info["excerpt_sha256"],
+        "source_revision": info["source_revision"],
+        "excerpt": info["excerpt"],
+        "lines": [lp.to_dict() for lp in info["lines"]],
+        "owner": info["owner"],
         "authority_class": AuthorityClass.UNVERIFIED_SOURCE.value,
+        "capture_mode_legend": dict(CAPTURE_MODE_LEGEND),
         "normative_statement": None,
-        "heuristic_statements": [s.to_dict() for s in stmts],
-        "linked_evidence_ids": linked_evidence,
+        "heuristic_statements": [s.to_dict() for s in info["heuristic_statements"]],
+        "linked_evidence_ids": sorted(linked_ev_ids),
+        "linked_evidence": linked_evidence,
+        "linked_candidates": linked_candidates,
         "explanation": (
             "Raw documentation is unverified source material, NOT an approved or active practice. "
-            "Use `onemind propose` to draft an inert candidate linked to this source."
+            "Heuristic scan statements are automated unverified discoveries; use `onemind propose` "
+            "to explicitly capture an inert source-linked PracticeCandidate."
         ),
     }
 
@@ -259,7 +302,6 @@ def _inspect_record(
         commit_ref=get_head_commit(repo_root),
     )
 
-    # Gather lineage: evidence, candidates, governing practice, decisions, applications, conflicts
     evidence_ids: list[str] = []
     if kind == RecordKind.EVIDENCE:
         evidence_ids = [rec_id]
@@ -279,14 +321,19 @@ def _inspect_record(
         ev = by_id.get(ev_id)
         if ev is not None:
             eb = ev["body"]
+            src_prov = ev.get("extensions", {}).get("source_provenance", {})
             evidence_details.append(
                 {
                     "record_id": ev_id,
                     "source_type": eb.get("source_type"),
                     "source_uri": eb.get("source_uri"),
+                    "source_id": eb.get("source_id"),
                     "source_state": eb.get("source_state"),
                     "excerpt_sha256": eb.get("excerpt_sha256"),
                     "redacted_snapshot": eb.get("redacted_snapshot"),
+                    "capture_mode": _detect_record_capture_mode(ev),
+                    "line_provenance": src_prov.get("lines", []),
+                    "disk_verification": _check_live_source_drift(repo_root, eb),
                 }
             )
         else:
@@ -321,7 +368,6 @@ def _inspect_record(
         and rec_id in (r.get("body", {}).get("left_record_id"), r.get("body", {}).get("right_record_id"))
     ]
 
-    # Authority and lifecycle classification
     authority_class = AuthorityClass.INERT_EVIDENCE.value
     lifecycle = "inert"
     verified_repo = False
@@ -371,6 +417,7 @@ def _inspect_record(
         "record_sha256": canonical_sha256(rec),
         "created_at": rec.get("created_at"),
         "actor": rec.get("actor"),
+        "capture_mode": _detect_record_capture_mode(rec),
         "normative_statement": normative_statement,
         "scope": scope,
         "authority_class": authority_class,
@@ -412,10 +459,9 @@ def _cmd_inspect(args: argparse.Namespace) -> int:
                 allow_local=args.allow_local,
             )
         else:
-            raw_path, l_start, l_end = _parse_source_spec(target)
+            raw_path, l_start, _ = parse_source_spec(target)
             cand_path = Path(raw_path)
             abs_cand = cand_path if cand_path.is_absolute() else (repo_root / cand_path)
-            # Check if target is a single JSON record file
             if l_start is None and abs_cand.is_file() and abs_cand.suffix == ".json":
                 if not _is_within_root(repo_root, abs_cand) and not cand_path.is_absolute():
                     raise ValueError(f"Path {target!r} escapes repository root.")
@@ -430,9 +476,9 @@ def _cmd_inspect(args: argparse.Namespace) -> int:
                         allow_local=args.allow_local,
                     )
                 else:
-                    result = _inspect_source_file(repo_root, raw_path, l_start, l_end, records)
+                    result = _inspect_source_file(repo_root, target, records)
             else:
-                result = _inspect_source_file(repo_root, raw_path, l_start, l_end, records)
+                result = _inspect_source_file(repo_root, target, records)
     except (FileNotFoundError, ValueError, json.JSONDecodeError) as exc:
         _emit_error(str(exc), as_json=args.json, code="INSPECT_TARGET_ERROR")
         return EXIT_INVALID
@@ -446,19 +492,27 @@ def _cmd_inspect(args: argparse.Namespace) -> int:
         print(f"URI:             {result['source_uri']}")
         print(f"Authority class: {result['authority_class']} (inert — NOT an active practice)")
         print(f"Owner/Author:    {result['owner']}")
+        print(f"File SHA-256:    {result['file_sha256']}")
         print(f"Excerpt SHA-256: {result['excerpt_sha256']}")
         print(f"Linked evidence: {result['linked_evidence_ids'] or 'none'}")
-        print("\nExcerpt:")
-        for line in result["excerpt"].splitlines()[:20]:
-            print(f"  | {line}")
+        print("\nPer-line source provenance:")
+        for lp in result["lines"][:20]:
+            print(f"  L{lp['line_number']:>4} [{lp['line_sha256'][:10]}] | {lp['text']}")
+        if len(result["lines"]) > 20:
+            print(f"  ... ({len(result['lines']) - 20} more line(s); use --json for full list)")
         if result["heuristic_statements"]:
-            print(f"\nHeuristic normative statements ({len(result['heuristic_statements'])}):")
+            print(f"\nHeuristic scan statements ({len(result['heuristic_statements'])}, capture_mode=heuristic-scan):")
             for s in result["heuristic_statements"][:8]:
-                print(f"  - L{s['line_number']}: {s['text']}")
+                print(f"  - L{s['line_number']} [{s['matched_signal']}]: {s['text']}")
+        if result["linked_candidates"]:
+            print(f"\nLinked candidates ({len(result['linked_candidates'])}):")
+            for c in result["linked_candidates"]:
+                print(f"  - {c['record_id']} (capture_mode={c['capture_mode']}, {c['authority_class']}): {c['statement']}")
         print(f"\nNote: {result['explanation']}")
     else:
         print(f"Record:          {result['record_id']} (kind={result['kind']}, schema={result['schema_version']})")
         print(f"Canonical SHA:   {result['record_sha256']}")
+        print(f"Capture mode:    {result['capture_mode']}")
         print(f"Authority class: {result['authority_class']}")
         print(f"Lifecycle:       {result['lifecycle']} (verified_repo_approval={result['verified_repository_approval']})")
         if result.get("normative_statement"):
@@ -466,12 +520,16 @@ def _cmd_inspect(args: argparse.Namespace) -> int:
         if result.get("scope"):
             print(f"Scope:           {json.dumps(result['scope'], sort_keys=True)}")
         if result["evidence"]:
-            print("\nEvidence:")
+            print("\nEvidence & source provenance:")
             for ev in result["evidence"]:
                 if ev.get("missing"):
                     print(f"  - {ev['record_id']} (MISSING)")
                 else:
-                    print(f"  - {ev['record_id']}: {ev['source_uri']} (state={ev['source_state']})")
+                    drift = ev.get("disk_verification", {}).get("status", "not-checked")
+                    print(
+                        f"  - {ev['record_id']}: {ev['source_uri']} "
+                        f"(state={ev['source_state']}, capture_mode={ev['capture_mode']}, disk={drift})"
+                    )
                     if ev.get("redacted_snapshot"):
                         print(f"    \"{ev['redacted_snapshot']}\"")
         decs = result["lineage"]["governance_decisions"]
@@ -500,119 +558,27 @@ def _cmd_propose(args: argparse.Namespace) -> int:
         return EXIT_INVALID
 
     store = GitRecordStore(repo_root)
-    existing_records = store.list_records()
-    by_id = {str(r["record_id"]): r for r in existing_records}
-
-    now = utc_now_iso()
-    new_evidence: list[RecordDict] = []
-    evidence_ids: list[str] = []
-
-    for ev_ref in args.evidence:
-        if ev_ref in by_id:
-            if by_id[ev_ref].get("kind") != RecordKind.EVIDENCE:
-                _emit_error(
-                    f"Record {ev_ref!r} has kind {by_id[ev_ref].get('kind')!r}, expected 'evidence'.",
-                    as_json=args.json,
-                    code="PROPOSE_INVALID_EVIDENCE",
-                )
-                return EXIT_INVALID
-            evidence_ids.append(ev_ref)
-            continue
-
-        # Treat as repo source file[:line[-end]] and synthesize an inert Evidence record
-        raw_path, l_start, l_end = _parse_source_spec(ev_ref)
-        cand_path = Path(raw_path)
-        abs_path = cand_path if cand_path.is_absolute() else (repo_root / cand_path)
-        if ".." in Path(raw_path).parts or not _is_within_root(repo_root, abs_path):
-            _emit_error(
-                f"Evidence path {ev_ref!r} escapes repository root {repo_root}.",
-                as_json=args.json,
-                code="PATH_TRAVERSAL_REJECTED",
-            )
-            return EXIT_INVALID
-        if not abs_path.is_file():
-            _emit_error(
-                f"Evidence reference {ev_ref!r} is neither an existing evidence record ID nor a readable file.",
-                as_json=args.json,
-                code="PROPOSE_MISSING_EVIDENCE",
-            )
-            return EXIT_INVALID
-
-        rel_posix = abs_path.resolve().relative_to(repo_root).as_posix()
-        text = abs_path.read_text(encoding="utf-8")
-        lines = text.splitlines()
-        if l_start is not None:
-            end = l_end if l_end is not None else l_start
-            if l_start < 1 or end < l_start or end > len(lines):
-                _emit_error(
-                    f"Line range {l_start}-{end} out of bounds for {rel_posix} ({len(lines)} lines).",
-                    as_json=args.json,
-                    code="PROPOSE_INVALID_LINES",
-                )
-                return EXIT_INVALID
-            excerpt = "\n".join(lines[l_start - 1 : end]).strip()
-            src_uri = f"repo://{rel_posix}#L{l_start}"
-            src_id = f"{rel_posix}:{l_start}"
-        else:
-            # Take first non-empty normative/body lines up to 500 chars
-            excerpt = text.strip()[:500]
-            src_uri = f"repo://{rel_posix}"
-            src_id = rel_posix
-
-        ev_id = generate_record_id("ev")
-        ev_body: dict[str, Any] = {
-            "source_type": "local-file",
-            "source_uri": src_uri,
-            "source_id": src_id,
-            "observed_at": now,
-            "source_author": args.source_author or "repo-maintainer",
-            "excerpt_sha256": excerpt_sha256(excerpt),
-            "source_state": "available",
-            "redacted_snapshot": excerpt,
-        }
-        head = get_head_commit(repo_root)
-        if head:
-            ev_body["source_revision"] = head
-
-        ev_record = make_envelope(
-            kind=RecordKind.EVIDENCE,
-            body=ev_body,
-            actor_type=ActorType.HUMAN,
+    try:
+        result = propose_from_source(
+            store,
+            repo_root,
+            statement=args.statement,
+            evidence_specs=args.evidence,
+            scope_repository=args.scope_repo or repo_root.name,
+            scope_paths=args.scope_path or (),
+            scope_languages=args.scope_lang or (),
             actor_id=args.actor,
-            record_id=ev_id,
-            created_at=now,
+            source_author=args.source_author,
+            record_id=args.record_id,
+            generator_name="onemind-cli-propose",
+            generator_version=__version__,
+            write=bool(args.write),
         )
-        new_evidence.append(ev_record)
-        evidence_ids.append(ev_id)
+    except (FileNotFoundError, ValueError, StoreError) as exc:
+        code = "PATH_TRAVERSAL_REJECTED" if "escapes repository root" in str(exc) else "PROPOSE_INPUT_ERROR"
+        _emit_error(str(exc), as_json=args.json, code=code)
+        return EXIT_INVALID
 
-    proposed_scope: dict[str, Any] = {
-        "repository": args.scope_repo or repo_root.name,
-    }
-    if args.scope_path:
-        proposed_scope["paths"] = list(args.scope_path)
-    if args.scope_lang:
-        proposed_scope["languages"] = list(args.scope_lang)
-
-    cand_id = args.record_id or generate_record_id("cand")
-    candidate = make_envelope(
-        kind=RecordKind.PRACTICE_CANDIDATE,
-        body={
-            "statement": args.statement,
-            "proposed_scope": proposed_scope,
-            "evidence_ids": evidence_ids,
-            "generator": {
-                "name": "onemind-cli-propose",
-                "version": __version__,
-            },
-        },
-        actor_type=ActorType.HUMAN,
-        actor_id=args.actor,
-        record_id=cand_id,
-        created_at=now,
-    )
-
-    engine = OneMindEngine(store)
-    result = engine.propose(candidate, evidence=new_evidence, write=bool(args.write))
     if not result.valid:
         if args.json:
             _emit_json(result.to_dict())
@@ -623,27 +589,32 @@ def _cmd_propose(args: argparse.Namespace) -> int:
                     sys.stderr.write(f"  - [{issue.code}] {issue.message}\n")
         return EXIT_INVALID
 
+    cand_dict = result.to_dict()["candidate"]
+    ev_dicts = result.to_dict()["evidence"]
+    cand_id = str(cand_dict["record_id"])
     planned_files = [
         str(store.record_path(ev["kind"], ev["record_id"]).relative_to(repo_root))
-        for ev in new_evidence
-    ] + [str(store.record_path(candidate["kind"], candidate["record_id"]).relative_to(repo_root))]
+        for ev in ev_dicts
+    ] + [str(store.record_path(cand_dict["kind"], cand_id).relative_to(repo_root))]
 
     out_payload = result.to_dict()
     out_payload["planned_files"] = planned_files
     out_payload["dry_run"] = not bool(args.write)
     out_payload["authority_class"] = AuthorityClass.INERT_CANDIDATE.value
+    out_payload["capture_mode"] = "explicit-capture"
 
     if args.json:
         _emit_json(out_payload)
         return EXIT_OK
 
-    mode_label = "WRITTEN (inert records persisted)" if args.write else "DRY-RUN PREVIEW (no files written)"
+    mode_label = "WRITTEN (inert records persisted atomically)" if args.write else "DRY-RUN PREVIEW (no files written)"
     print(f"OneMind propose — {mode_label}")
     print(f"Candidate ID:    {cand_id}")
+    print("Capture mode:    explicit-capture")
     print(f"Authority class: {AuthorityClass.INERT_CANDIDATE.value} (never activated automatically)")
     print(f"Statement:       {args.statement}")
-    print(f"Proposed scope:  {json.dumps(proposed_scope, sort_keys=True)}")
-    print(f"Evidence IDs:    {evidence_ids}")
+    print(f"Proposed scope:  {json.dumps(cand_dict['body']['proposed_scope'], sort_keys=True)}")
+    print(f"Evidence IDs:    {cand_dict['body']['evidence_ids']}")
     print("\nTarget files:")
     for pf in planned_files:
         prefix = "+" if args.write else "~"
@@ -693,7 +664,6 @@ def _cmd_preview(args: argparse.Namespace) -> int:
                 code="PREVIEW_MISSING_PRACTICE",
             )
             return EXIT_INVALID
-        # Find first application targeting this practice_version if --checker not overridden
         for r in records:
             if (
                 r.get("kind") == RecordKind.APPLICATION
@@ -711,13 +681,11 @@ def _cmd_preview(args: argparse.Namespace) -> int:
             )
             return EXIT_INVALID
     else:
-        # Auto-pick single application if unambiguous and no explicit target given
         apps = [r for r in records if r.get("kind") == RecordKind.APPLICATION]
         if len(apps) == 1:
             app_rec = apps[0]
             pv_rec = by_id.get(str(app_rec["body"]["practice_version_id"]))
 
-    # Determine checker implementation ID (NEVER execute arbitrary paths/code!)
     impl_id = args.checker
     if impl_id is None and app_rec is not None:
         impl_id = app_rec.get("body", {}).get("detection", {}).get("implementation")
@@ -732,7 +700,6 @@ def _cmd_preview(args: argparse.Namespace) -> int:
 
     checker = resolve_checker(str(impl_id))
 
-    # Resolve base and proposed paths safely within repo_root (unless explicit absolute paths passed)
     base_input = args.base
     proposed_input = args.proposed
     if app_rec is not None:
@@ -742,7 +709,6 @@ def _cmd_preview(args: argparse.Namespace) -> int:
         if proposed_input is None and len(decl_inputs) >= 2:
             proposed_input = str(repo_root / decl_inputs[1])
 
-    # Guard against path traversal for relative paths inside repo
     for label, val in (("base", base_input), ("proposed", proposed_input)):
         if val is not None and not Path(val).is_absolute():
             candidate_p = repo_root / val
@@ -758,7 +724,6 @@ def _cmd_preview(args: argparse.Namespace) -> int:
             else:
                 proposed_input = str(candidate_p)
 
-    # Compute authority explanation
     if pv_rec is not None:
         pv_state = eff.practice_states.get(str(pv_rec["record_id"]))
         practice_info = {
@@ -832,7 +797,7 @@ def _cmd_preview(args: argparse.Namespace) -> int:
         "check_result": check_res.to_dict(),
         "advisory_notice": (
             "Preview runs in local advisory mode only; it never mutates records, "
-            "activates practices, or enforces CI merge gates."
+            "activates practices, enforces enterprise CI gates, or proves engineering improvement."
         ),
     }
 
@@ -952,7 +917,7 @@ def build_parser() -> argparse.ArgumentParser:
     # scan
     p_scan = sub.add_parser(
         "scan",
-        help="Offline, read-only scan of instruction files and ADRs in a repository.",
+        help="Offline, read-only scan of instruction files and ADRs with per-line provenance.",
     )
     p_scan.add_argument("repo", nargs="?", default=".", help="Path to repository directory (default: .)")
     p_scan.add_argument(
@@ -973,7 +938,7 @@ def build_parser() -> argparse.ArgumentParser:
     # inspect
     p_inspect = sub.add_parser(
         "inspect",
-        help="Explain provenance, authority class, lineage, and scope of a source file or record.",
+        help="Explain per-line provenance, capture mode, authority class, lineage, and scope.",
     )
     p_inspect.add_argument(
         "target",
@@ -993,7 +958,7 @@ def build_parser() -> argparse.ArgumentParser:
     # propose
     p_propose = sub.add_parser(
         "propose",
-        help="Draft an inert PracticeCandidate from explicit evidence (dry-run by default).",
+        help="Explicitly capture an inert PracticeCandidate from source evidence (dry-run by default).",
     )
     p_propose.add_argument("--repo", default=".", help="Path to repository directory (default: .)")
     p_propose.add_argument("--statement", required=True, help="Normative practice statement to propose.")
@@ -1022,7 +987,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_propose.add_argument(
         "--write",
         action="store_true",
-        help="Persist inert record(s) under .onemind/records/. Without --write, runs as dry-run preview.",
+        help="Atomically persist inert record(s) under .onemind/records/. Without --write, runs as dry-run preview.",
     )
     p_propose.add_argument("--json", action="store_true", help="Emit machine-readable JSON to stdout.")
     p_propose.set_defaults(func=_cmd_propose)

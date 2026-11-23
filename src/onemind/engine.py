@@ -1,8 +1,8 @@
-"""Transport-independent logical domain operations: query, propose, resolve, observe."""
+"""Transport-independent logical domain operations using deeply immutable objects."""
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -19,9 +19,12 @@ from onemind.protocol.canonical import canonical_sha256
 from onemind.protocol.models import (
     COMPUTATION_VERSION,
     AuthorityClass,
+    ImmutableRecord,
     RecordDict,
     RecordKind,
+    freeze_value,
     parse_rfc3339,
+    unfreeze_value,
     utc_now_iso,
 )
 from onemind.protocol.scope import scope_matches_context
@@ -29,33 +32,105 @@ from onemind.protocol.validator import ValidationReport, validate_records
 
 
 @dataclass(frozen=True)
-class AnnotatedRecord:
-    """A record returned by query() annotated with explicit authority/provenance."""
+class QueryCriteria:
+    """Immutable criteria object for transport-independent query()."""
 
-    record: RecordDict
+    kinds: tuple[str, ...] = ()
+    record_ids: tuple[str, ...] = ()
+    repository: str | None = None
+    paths: tuple[str, ...] = ()
+    languages: tuple[str, ...] = ()
+    conditions: tuple[str, ...] = ()
+    text: str | None = None
+    source_type: str | None = None
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any] | QueryCriteria | None) -> QueryCriteria:
+        if data is None:
+            return cls()
+        if isinstance(data, QueryCriteria):
+            return data
+        return cls(
+            kinds=tuple(str(k) for k in (data.get("kinds") or ())),
+            record_ids=tuple(str(r) for r in (data.get("record_ids") or ())),
+            repository=str(data["repository"]) if data.get("repository") else None,
+            paths=tuple(str(p) for p in (data.get("paths") or ())),
+            languages=tuple(str(lang) for lang in (data.get("languages") or ())),
+            conditions=tuple(str(c) for c in (data.get("conditions") or ())),
+            text=str(data["text"]) if data.get("text") else None,
+            source_type=str(data["source_type"]) if data.get("source_type") else None,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        if self.kinds:
+            out["kinds"] = list(self.kinds)
+        if self.record_ids:
+            out["record_ids"] = list(self.record_ids)
+        if self.repository:
+            out["repository"] = self.repository
+        if self.paths:
+            out["paths"] = list(self.paths)
+        if self.languages:
+            out["languages"] = list(self.languages)
+        if self.conditions:
+            out["conditions"] = list(self.conditions)
+        if self.text:
+            out["text"] = self.text
+        if self.source_type:
+            out["source_type"] = self.source_type
+        return out
+
+
+@dataclass(frozen=True)
+class ResolutionContext:
+    """Immutable context object for transport-independent resolve()."""
+
+    repository: str
+    paths: tuple[str, ...] = ()
+    languages: tuple[str, ...] = ()
+    conditions: tuple[str, ...] = ()
+
+    def to_mapping(self) -> Mapping[str, Any]:
+        out: dict[str, Any] = {"repository": self.repository}
+        if self.paths:
+            out["paths"] = list(self.paths)
+        if self.languages:
+            out["languages"] = list(self.languages)
+        if self.conditions:
+            out["conditions"] = list(self.conditions)
+        frozen: Mapping[str, Any] = freeze_value(out)
+        return frozen
+
+
+@dataclass(frozen=True)
+class AnnotatedRecord:
+    """Deeply immutable record returned by query() annotated with explicit authority/provenance."""
+
+    record: ImmutableRecord
     record_sha256: str
     authority_class: AuthorityClass
     lifecycle: str
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "record_id": self.record.get("record_id"),
-            "kind": self.record.get("kind"),
+            "record_id": self.record.record_id,
+            "kind": self.record.kind,
             "record_sha256": self.record_sha256,
             "authority_class": self.authority_class.value,
             "lifecycle": self.lifecycle,
-            "record": self.record,
+            "record": self.record.to_dict(),
         }
 
 
 @dataclass(frozen=True)
 class QueryResult:
-    """Result of logical query(criteria, as_of)."""
+    """Immutable result of logical query(criteria, as_of)."""
 
     as_of: str
     commit_ref: str | None
     computation_version: str
-    records: list[AnnotatedRecord]
+    records: tuple[AnnotatedRecord, ...]
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -69,13 +144,13 @@ class QueryResult:
 
 @dataclass(frozen=True)
 class ProposalResult:
-    """Result of logical propose(candidate): always inert, dry-run unless write=True."""
+    """Immutable result of logical propose(candidate): always inert, dry-run unless write=True."""
 
     written: bool
     valid: bool
-    candidate: RecordDict
-    evidence: list[RecordDict] = field(default_factory=list)
-    written_record_ids: list[str] = field(default_factory=list)
+    candidate: Mapping[str, Any]
+    evidence: tuple[Mapping[str, Any], ...] = field(default_factory=tuple)
+    written_record_ids: tuple[str, ...] = field(default_factory=tuple)
     validation: ValidationReport | None = None
     note: str = "Practice candidates are always inert and never activate automatically."
 
@@ -83,9 +158,9 @@ class ProposalResult:
         return {
             "written": self.written,
             "valid": self.valid,
-            "written_record_ids": self.written_record_ids,
-            "candidate": self.candidate,
-            "evidence": self.evidence,
+            "written_record_ids": list(self.written_record_ids),
+            "candidate": unfreeze_value(self.candidate),
+            "evidence": [unfreeze_value(e) for e in self.evidence],
             "validation": self.validation.to_dict() if self.validation else None,
             "note": self.note,
         }
@@ -93,7 +168,7 @@ class ProposalResult:
 
 @dataclass(frozen=True)
 class ObservationResult:
-    """Result of logical observe(event): deduplicated append without governance mutation."""
+    """Immutable result of logical observe(event): deduplicated append without governance mutation."""
 
     appended: bool
     deduplicated: bool
@@ -149,39 +224,29 @@ class OneMindEngine:
 
     def query(
         self,
-        criteria: dict[str, Any] | None = None,
+        criteria: Mapping[str, Any] | QueryCriteria | None = None,
         as_of: str | None = None,
         *,
         allow_local_assertions: bool | None = None,
     ) -> QueryResult:
-        """Read-only query returning records annotated with explicit authority labels.
-
-        Supported criteria keys:
-          - kinds: list[str]
-          - record_ids: list[str]
-          - repository: str
-          - paths: list[str]
-          - languages: list[str]
-          - text: str (case-insensitive substring match against statement or snapshot)
-          - source_type: str (for evidence records)
-        """
-        crit = criteria or {}
+        """Read-only query returning deeply immutable records annotated with authority labels."""
+        crit = QueryCriteria.from_mapping(criteria)
         eval_as_of = as_of or utc_now_iso()
         eval_dt = parse_rfc3339(eval_as_of)
         eff = self.effective_state(as_of=eval_as_of, allow_local_assertions=allow_local_assertions)
 
-        allowed_kinds = set(crit["kinds"]) if crit.get("kinds") else None
-        allowed_ids = set(crit["record_ids"]) if crit.get("record_ids") else None
-        text_filter = str(crit["text"]).lower() if crit.get("text") else None
-        source_type_filter = str(crit["source_type"]) if crit.get("source_type") else None
+        allowed_kinds = set(crit.kinds) if crit.kinds else None
+        allowed_ids = set(crit.record_ids) if crit.record_ids else None
+        text_filter = crit.text.lower() if crit.text else None
+        source_type_filter = crit.source_type
         scope_ctx = (
             {
-                "repository": crit["repository"],
-                "paths": crit.get("paths"),
-                "languages": crit.get("languages"),
-                "conditions": crit.get("conditions"),
+                "repository": crit.repository,
+                "paths": list(crit.paths) or None,
+                "languages": list(crit.languages) or None,
+                "conditions": list(crit.conditions) or None,
             }
-            if crit.get("repository")
+            if crit.repository
             else None
         )
 
@@ -190,7 +255,6 @@ class OneMindEngine:
             rec_id = str(rec.get("record_id", ""))
             kind = str(rec.get("kind", ""))
 
-            # Respect as_of filter on created_at when querying historical view
             created_str = rec.get("created_at")
             if isinstance(created_str, str):
                 try:
@@ -219,7 +283,6 @@ class OneMindEngine:
                     if body.get("repo_id") != scope_ctx["repository"]:
                         continue
                 elif kind == RecordKind.EVIDENCE:
-                    # Evidence is repo-linked via source_uri or extensions if present
                     pass
                 else:
                     continue
@@ -233,10 +296,11 @@ class OneMindEngine:
                     continue
 
             auth_class, lifecycle = self._classify_record_authority(rec_id, kind, eff)
+            imm = ImmutableRecord.from_mapping(rec)
             matched.append(
                 AnnotatedRecord(
-                    record=rec,
-                    record_sha256=canonical_sha256(rec),
+                    record=imm,
+                    record_sha256=imm.record_sha256,
                     authority_class=auth_class,
                     lifecycle=lifecycle,
                 )
@@ -246,7 +310,7 @@ class OneMindEngine:
             as_of=eval_as_of,
             commit_ref=self.store.snapshot_commit(),
             computation_version=COMPUTATION_VERSION,
-            records=matched,
+            records=tuple(matched),
         )
 
     def _classify_record_authority(
@@ -280,78 +344,86 @@ class OneMindEngine:
 
     def propose(
         self,
-        candidate: RecordDict,
+        candidate: Mapping[str, Any] | ImmutableRecord,
         *,
-        evidence: Sequence[RecordDict] = (),
+        evidence: Sequence[Mapping[str, Any] | ImmutableRecord] = (),
         write: bool = False,
     ) -> ProposalResult:
-        """Validate and optionally persist an inert PracticeCandidate (and optional Evidence).
+        """Validate and optionally atomically persist an inert PracticeCandidate (and Evidence).
 
         Never grants rights or activates any practice.
         """
-        if candidate.get("kind") != RecordKind.PRACTICE_CANDIDATE:
+        cand_dict: RecordDict = (
+            candidate.to_dict() if isinstance(candidate, ImmutableRecord) else unfreeze_value(candidate)
+        )
+        ev_dicts: list[RecordDict] = [
+            ev.to_dict() if isinstance(ev, ImmutableRecord) else unfreeze_value(ev)
+            for ev in evidence
+        ]
+
+        if cand_dict.get("kind") != RecordKind.PRACTICE_CANDIDATE:
             raise ValueError("propose() only accepts 'practice_candidate' records.")
-        for ev in evidence:
+        for ev in ev_dicts:
             if ev.get("kind") != RecordKind.EVIDENCE:
                 raise ValueError("propose() evidence parameter only accepts 'evidence' records.")
 
-        combined = [*self.store.list_records(), *evidence, candidate]
+        combined = [*self.store.list_records(), *ev_dicts, cand_dict]
         report = validate_records(combined)
         if not report.valid:
             return ProposalResult(
                 written=False,
                 valid=False,
-                candidate=candidate,
-                evidence=list(evidence),
+                candidate=freeze_value(cand_dict),
+                evidence=tuple(freeze_value(e) for e in ev_dicts),
                 validation=report,
             )
 
         written_ids: list[str] = []
         if write:
-            for ev in evidence:
-                written_ids.append(self.store.append(ev))
-            written_ids.append(self.store.append(candidate))
+            # Atomic multi-record write: all evidence + candidate persist together or not at all
+            written_ids = self.store.append_many([*ev_dicts, cand_dict])
 
         return ProposalResult(
             written=write,
             valid=True,
-            candidate=candidate,
-            evidence=list(evidence),
-            written_record_ids=written_ids,
+            candidate=freeze_value(cand_dict),
+            evidence=tuple(freeze_value(e) for e in ev_dicts),
+            written_record_ids=tuple(written_ids),
             validation=report,
         )
 
     def resolve(
         self,
-        context: dict[str, Any],
+        context: Mapping[str, Any] | ResolutionContext,
         as_of: str | None = None,
         *,
         allow_local_assertions: bool | None = None,
     ) -> ResolutionResult:
         """Read-only projection of verified effective practices and applicable applications."""
+        ctx_map = context.to_mapping() if isinstance(context, ResolutionContext) else context
         eff = self.effective_state(as_of=as_of, allow_local_assertions=allow_local_assertions)
-        return resolve_context(eff, context)
+        return resolve_context(eff, ctx_map)
 
     def observe(
         self,
-        event: RecordDict,
+        event: Mapping[str, Any] | ImmutableRecord,
         *,
         batch_id: str | None = None,
     ) -> ObservationResult:
         """Append a deduplicated, immutable OutcomeEvent without altering governance state."""
-        if event.get("kind") != RecordKind.OUTCOME_EVENT:
+        ev_dict: RecordDict = (
+            event.to_dict() if isinstance(event, ImmutableRecord) else unfreeze_value(event)
+        )
+        if ev_dict.get("kind") != RecordKind.OUTCOME_EVENT:
             raise ValueError("observe() only accepts 'outcome_event' records.")
         existing_records = self.store.list_records()
-        # Validate event against existing store references (skip duplicate dedup error if identical)
-        dedup_key = str(event.get("body", {}).get("dedup_key", ""))
-        already_same = False
+        dedup_key = str(ev_dict.get("body", {}).get("dedup_key", ""))
         for rec in existing_records:
             if (
                 rec.get("kind") == RecordKind.OUTCOME_EVENT
                 and rec.get("body", {}).get("dedup_key") == dedup_key
             ):
-                if canonical_sha256(rec["body"]) == canonical_sha256(event["body"]):
-                    already_same = True
+                if canonical_sha256(rec["body"]) == canonical_sha256(ev_dict["body"]):
                     return ObservationResult(
                         appended=False,
                         deduplicated=True,
@@ -362,14 +434,13 @@ class OneMindEngine:
                     f"Conflicting outcome_event for existing dedup_key {dedup_key!r}."
                 )
 
-        if not already_same:
-            report = validate_records([*existing_records, event])
-            if not report.valid:
-                msg = "; ".join(f"[{e.code}] {e.message}" for e in report.errors)
-                raise ValueError(f"Invalid outcome_event: {msg}")
+        report = validate_records([*existing_records, ev_dict])
+        if not report.valid:
+            msg = "; ".join(f"[{e.code}] {e.message}" for e in report.errors)
+            raise ValueError(f"Invalid outcome_event: {msg}")
 
         if self.outcome_sink is not None:
-            appended, rec_id = self.outcome_sink.record_outcome(event, batch_id=batch_id)
+            appended, rec_id = self.outcome_sink.record_outcome(ev_dict, batch_id=batch_id)
             return ObservationResult(
                 appended=appended,
                 deduplicated=not appended,
@@ -377,7 +448,7 @@ class OneMindEngine:
                 dedup_key=dedup_key,
             )
 
-        rec_id = self.store.append(event)
+        rec_id = self.store.append(ev_dict)
         return ObservationResult(
             appended=True,
             deduplicated=False,

@@ -1,11 +1,15 @@
-"""Git-backed immutable append-only record store (.onemind/records and .onemind/batches)."""
+"""Git-backed immutable append-only record store with writer locking, atomicity, and recovery."""
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import secrets
+import shutil
 import subprocess
-from collections.abc import Sequence
+import threading
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +38,23 @@ from onemind.storage.mutation import (
     verify_trusted_base,
 )
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows fallback
+    fcntl = None  # type: ignore[assignment]
+
+_PROCESS_LOCKS_GUARD = threading.Lock()
+_PROCESS_LOCKS: dict[Path, threading.RLock] = {}
+
+
+def _get_thread_lock(lock_key: Path) -> threading.RLock:
+    with _PROCESS_LOCKS_GUARD:
+        lock = _PROCESS_LOCKS.get(lock_key)
+        if lock is None:
+            lock = threading.RLock()
+            _PROCESS_LOCKS[lock_key] = lock
+        return lock
+
 
 def _ensure_within_root(root: Path, target: Path) -> Path:
     """Resolve target and verify it stays strictly within root (blocks symlink/traversal escapes)."""
@@ -48,8 +69,31 @@ def _ensure_within_root(root: Path, target: Path) -> Path:
     return resolved_target
 
 
+def _fsync_directory(directory: Path) -> None:
+    """Best-effort fsync on a directory for crash durability."""
+    try:
+        dir_fd = os.open(str(directory), os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(dir_fd)
+    except OSError:
+        pass
+    finally:
+        os.close(dir_fd)
+
+
 class GitRecordStore(Store, OutcomeSink):
-    """Canonical file-based store under `<repo>/.onemind/` backed by Git."""
+    """Canonical file-based store under `<repo>/.onemind/` backed by Git.
+
+    Hardening properties:
+    - Cross-thread (`RLock`) and cross-process (`fcntl.flock`) writer synchronization.
+    - Multi-record atomic transactions (`append_many`) with full staging and rollback.
+    - Atomic batch directory staging (`append_batch`) with manifest SHA-256 verification.
+    - Safe path containment blocking symlink and `..` traversal escapes.
+    - Explicit corruption detection and safe staging recovery (`recover_staging`).
+    - Read-only operations never create lock files or mutate the working tree.
+    """
 
     def __init__(self, repo_path: Path | str, *, store_rel_dir: str = ".onemind") -> None:
         self.repo_path = Path(repo_path).resolve()
@@ -57,6 +101,26 @@ class GitRecordStore(Store, OutcomeSink):
         self.store_dir = self.repo_path / store_rel_dir
         self.records_dir = self.store_dir / "records"
         self.batches_dir = self.store_dir / "batches"
+        self.cache_dir = self.store_dir / "cache"
+        self._lock_path = self.cache_dir / ".write.lock"
+
+    @contextlib.contextmanager
+    def _writer_lock(self) -> Iterator[None]:
+        """Acquire both in-process thread lock and cross-process advisory file lock."""
+        tlock = _get_thread_lock(self.store_dir)
+        with tlock:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            _ensure_within_root(self.repo_path, self.cache_dir)
+            fd = os.open(str(self._lock_path), os.O_RDWR | os.O_CREAT, 0o644)
+            try:
+                if fcntl is not None:
+                    fcntl.flock(fd, fcntl.LOCK_EX)
+                yield
+            finally:
+                if fcntl is not None:
+                    with contextlib.suppress(OSError):
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
 
     def record_path(self, kind: str, record_id: str) -> Path:
         if kind not in ALL_RECORD_KINDS:
@@ -74,15 +138,17 @@ class GitRecordStore(Store, OutcomeSink):
                 if not kdir.is_dir():
                     continue
                 for p in sorted(kdir.glob("*.json")):
+                    if p.name.startswith(".tmp-"):
+                        continue
                     _ensure_within_root(self.repo_path, p)
                     files.append(p)
-        # Also include outcome_event records stored inside immutable batches
+        # Include finalized outcome_event records stored inside immutable batches
         if (kind is None or kind == RecordKind.OUTCOME_EVENT) and self.batches_dir.is_dir():
             for batch_dir in sorted(self.batches_dir.iterdir()):
-                if not batch_dir.is_dir():
+                if not batch_dir.is_dir() or batch_dir.name.startswith(".staging-"):
                     continue
                 for p in sorted(batch_dir.glob("*.json")):
-                    if p.name == "manifest.json":
+                    if p.name == "manifest.json" or p.name.startswith(".tmp-"):
                         continue
                     _ensure_within_root(self.repo_path, p)
                     files.append(p)
@@ -110,10 +176,140 @@ class GitRecordStore(Store, OutcomeSink):
         )
         return records
 
+    def verify_batch_manifests(self) -> list[tuple[Path, str, str]]:
+        """Verify integrity of finalized batches and detect orphaned staging artifacts.
+
+        Returns list of (path, error_code, message).
+        """
+        findings: list[tuple[Path, str, str]] = []
+        if not self.batches_dir.is_dir():
+            return findings
+
+        for entry in sorted(self.batches_dir.iterdir()):
+            if entry.name.startswith(".staging-"):
+                findings.append(
+                    (
+                        entry,
+                        "ORPHAN_STAGING_ARTIFACT",
+                        f"Incomplete staging batch directory {entry.name!r} detected; run recover_staging() to clean up.",
+                    )
+                )
+                continue
+            if not entry.is_dir():
+                continue
+
+            manifest_path = entry / "manifest.json"
+            if not manifest_path.is_file():
+                findings.append(
+                    (
+                        manifest_path,
+                        "CORRUPT_BATCH_MANIFEST",
+                        f"Batch directory {entry.name!r} is missing manifest.json.",
+                    )
+                )
+                continue
+
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                findings.append(
+                    (
+                        manifest_path,
+                        "CORRUPT_BATCH_MANIFEST",
+                        f"Batch manifest {manifest_path} is not valid JSON: {exc}",
+                    )
+                )
+                continue
+
+            if not isinstance(manifest, dict) or not isinstance(manifest.get("events"), list):
+                findings.append(
+                    (
+                        manifest_path,
+                        "CORRUPT_BATCH_MANIFEST",
+                        f"Batch manifest {manifest_path} missing 'events' list.",
+                    )
+                )
+                continue
+
+            listed_files: set[str] = set()
+            for item in manifest["events"]:
+                if not isinstance(item, dict) or not item.get("file") or not item.get("record_sha256"):
+                    findings.append(
+                        (
+                            manifest_path,
+                            "CORRUPT_BATCH_MANIFEST",
+                            f"Batch manifest {manifest_path} contains malformed event entry.",
+                        )
+                    )
+                    continue
+                fname = str(item["file"])
+                listed_files.add(fname)
+                ev_path = entry / fname
+                if not ev_path.is_file():
+                    findings.append(
+                        (
+                            ev_path,
+                            "CORRUPT_BATCH_MANIFEST",
+                            f"Manifest lists missing batch event file {fname!r}.",
+                        )
+                    )
+                    continue
+                try:
+                    ev_obj = json.loads(ev_path.read_text(encoding="utf-8"))
+                    actual_sha = canonical_sha256(ev_obj)
+                except (OSError, ValueError, TypeError) as exc:
+                    findings.append(
+                        (
+                            ev_path,
+                            "MALFORMED_RECORD_FILE",
+                            f"Could not parse/canonicalize batch event {ev_path}: {exc}",
+                        )
+                    )
+                    continue
+                if actual_sha != item["record_sha256"]:
+                    findings.append(
+                        (
+                            ev_path,
+                            "BATCH_EVENT_DIGEST_MISMATCH",
+                            (
+                                f"Batch event {fname!r} canonical digest {actual_sha!r} "
+                                f"does not match manifest digest {item['record_sha256']!r}."
+                            ),
+                        )
+                    )
+
+            for actual_file in sorted(entry.glob("*.json")):
+                if actual_file.name == "manifest.json":
+                    continue
+                if actual_file.name not in listed_files:
+                    findings.append(
+                        (
+                            actual_file,
+                            "CORRUPT_BATCH_MANIFEST",
+                            f"Unlisted event file {actual_file.name!r} present in batch {entry.name!r}.",
+                        )
+                    )
+        return findings
+
     def list_records_raw_with_errors(self) -> tuple[list[RecordDict], list[tuple[Path, str]]]:
         """Load all record files without raising on malformed JSON, for `onemind validate`."""
         records: list[RecordDict] = []
         parse_errors: list[tuple[Path, str]] = []
+
+        # Detect orphan temp files left in record directories by interrupted writes
+        if self.records_dir.is_dir():
+            for tmp_file in sorted(self.records_dir.rglob(".tmp-*")):
+                parse_errors.append(
+                    (
+                        tmp_file,
+                        f"Orphan temporary staging file {tmp_file.name!r} detected; run recover_staging().",
+                    )
+                )
+
+        # Detect batch manifest corruption or orphan staging dirs
+        for bpath, code, msg in self.verify_batch_manifests():
+            parse_errors.append((bpath, f"[{code}] {msg}"))
+
         for path in self._iter_record_files(kind=None):
             try:
                 raw = json.loads(path.read_text(encoding="utf-8"))
@@ -123,7 +319,6 @@ class GitRecordStore(Store, OutcomeSink):
             if not isinstance(raw, dict):
                 parse_errors.append((path, "Record file must contain a JSON object."))
                 continue
-            # Check path/kind/id consistency
             if path.parent.parent == self.records_dir:
                 expected_kind = path.parent.name
                 expected_id = path.stem
@@ -144,6 +339,27 @@ class GitRecordStore(Store, OutcomeSink):
             records.append(raw)
         return records, parse_errors
 
+    def recover_staging(self) -> list[str]:
+        """Safely remove incomplete `.tmp-*` and `.staging-*` artifacts left by crashed writers.
+
+        Never touches finalized canonical record files or finalized batch directories.
+        """
+        cleaned: list[str] = []
+        with self._writer_lock():
+            if self.records_dir.is_dir():
+                for tmp_file in sorted(self.records_dir.rglob(".tmp-*")):
+                    if tmp_file.is_file():
+                        _ensure_within_root(self.repo_path, tmp_file)
+                        tmp_file.unlink()
+                        cleaned.append(str(tmp_file.relative_to(self.repo_path)))
+            if self.batches_dir.is_dir():
+                for staging_dir in sorted(self.batches_dir.glob(".staging-*")):
+                    if staging_dir.is_dir():
+                        _ensure_within_root(self.repo_path, staging_dir)
+                        shutil.rmtree(staging_dir)
+                        cleaned.append(str(staging_dir.relative_to(self.repo_path)))
+        return cleaned
+
     def get_record(self, record_id: str) -> RecordDict | None:
         if not is_safe_record_id(record_id):
             return None
@@ -155,6 +371,8 @@ class GitRecordStore(Store, OutcomeSink):
                 return loaded
         if self.batches_dir.is_dir():
             for batch_dir in sorted(self.batches_dir.iterdir()):
+                if not batch_dir.is_dir() or batch_dir.name.startswith(".staging-"):
+                    continue
                 candidate = batch_dir / f"{record_id}.json"
                 if candidate.is_file():
                     _ensure_within_root(self.repo_path, candidate)
@@ -171,49 +389,124 @@ class GitRecordStore(Store, OutcomeSink):
 
     def append(self, record: RecordDict) -> str:
         """Validate and atomically append a single immutable record."""
-        errors = validate_record_schema(record)
-        if errors:
-            raise StoreError(
-                f"Refusing to write invalid record: {'; '.join(e.message for e in errors)}"
-            )
-        rec_id = str(record["record_id"])
-        kind = str(record["kind"])
-        if not is_safe_record_id(rec_id):
-            raise StoreError(f"Unsafe record_id: {rec_id!r}")
+        ids = self.append_many([record])
+        return ids[0]
 
-        if self.get_record(rec_id) is not None:
-            raise DuplicateRecordError(
-                f"Record {rec_id!r} already exists; immutable records cannot be overwritten."
-            )
+    def append_many(self, records: Sequence[RecordDict]) -> list[str]:
+        """Atomically validate, stage, and persist multiple immutable records under writer lock.
 
-        if kind == RecordKind.OUTCOME_EVENT:
-            dedup_key = str(record["body"]["dedup_key"])
-            existing = self._find_existing_dedup_key(dedup_key)
-            if existing is not None:
-                prev_id, prev_digest = existing
-                if prev_digest != canonical_sha256(record["body"]):
-                    raise ConflictingDedupKeyError(
-                        f"dedup_key {dedup_key!r} already exists in {prev_id!r} with different payload."
+        All-or-nothing: if any record fails validation, collides with an existing ID or
+        conflicting dedup_key, or encounters an I/O error during promotion, any files staged
+        or linked during this transaction are rolled back completely.
+        """
+        if not records:
+            return []
+
+        with self._writer_lock():
+            existing_ids: set[str] = set()
+            existing_dedups: dict[str, tuple[str, str]] = {}
+            for rec in self.list_records():
+                rid = str(rec["record_id"])
+                existing_ids.add(rid)
+                if rec.get("kind") == RecordKind.OUTCOME_EVENT:
+                    dk = str(rec["body"]["dedup_key"])
+                    existing_dedups[dk] = (rid, canonical_sha256(rec["body"]))
+
+            # Phase 1: Validate all records before touching disk
+            plan: list[tuple[str, Path | None, str | None]] = []  # (result_id, target_path, payload)
+            tx_ids: set[str] = set()
+            tx_dedups: dict[str, tuple[str, str]] = {}
+
+            for record in records:
+                errors = validate_record_schema(record)
+                if errors:
+                    raise StoreError(
+                        f"Refusing to write invalid record: {'; '.join(e.message for e in errors)}"
                     )
-                return prev_id
+                rec_id = str(record["record_id"])
+                kind = str(record["kind"])
+                if not is_safe_record_id(rec_id):
+                    raise StoreError(f"Unsafe record_id: {rec_id!r}")
 
-        target = self.record_path(kind, rec_id)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        _ensure_within_root(self.repo_path, target.parent)
+                if rec_id in existing_ids or rec_id in tx_ids:
+                    raise DuplicateRecordError(
+                        f"Record {rec_id!r} already exists; immutable records cannot be overwritten."
+                    )
 
-        payload = json.dumps(record, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
-        try:
-            fd = os.open(str(target), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-        except FileExistsError as exc:
-            raise DuplicateRecordError(f"Record file already exists: {target}") from exc
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write(payload)
-        except Exception:
-            if target.exists():
-                target.unlink()
-            raise
-        return rec_id
+                if kind == RecordKind.OUTCOME_EVENT:
+                    dedup_key = str(record["body"]["dedup_key"])
+                    body_digest = canonical_sha256(record["body"])
+                    prior = tx_dedups.get(dedup_key) or existing_dedups.get(dedup_key)
+                    if prior is not None:
+                        prev_id, prev_digest = prior
+                        if prev_digest != body_digest:
+                            raise ConflictingDedupKeyError(
+                                f"dedup_key {dedup_key!r} already exists in {prev_id!r} with different payload."
+                            )
+                        plan.append((prev_id, None, None))
+                        continue
+                    tx_dedups[dedup_key] = (rec_id, body_digest)
+
+                target = self.record_path(kind, rec_id)
+                if target.exists():
+                    raise DuplicateRecordError(f"Record file already exists: {target}")
+
+                payload = json.dumps(record, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+                tx_ids.add(rec_id)
+                plan.append((rec_id, target, payload))
+
+            # Phase 2: Write fsynced temp files, then atomically link into place with rollback
+            tx_token = secrets.token_hex(6)
+            staged_temps: list[tuple[Path, Path]] = []  # (tmp_path, target_path)
+            linked_targets: list[Path] = []
+            touched_dirs: set[Path] = set()
+
+            try:
+                for _, maybe_target, maybe_payload in plan:
+                    if maybe_target is None or maybe_payload is None:
+                        continue
+                    maybe_target.parent.mkdir(parents=True, exist_ok=True)
+                    _ensure_within_root(self.repo_path, maybe_target.parent)
+                    touched_dirs.add(maybe_target.parent)
+                    tmp_path = maybe_target.parent / f".tmp-{os.getpid()}-{tx_token}-{maybe_target.name}"
+                    fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+                    try:
+                        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                            fh.write(maybe_payload)
+                            fh.flush()
+                            os.fsync(fh.fileno())
+                    except Exception:
+                        with contextlib.suppress(OSError):
+                            tmp_path.unlink()
+                        raise
+                    staged_temps.append((tmp_path, maybe_target))
+
+                # Promote atomically using os.link (fails with FileExistsError if target exists)
+                for tmp_path, target in staged_temps:
+                    try:
+                        os.link(str(tmp_path), str(target))
+                    except FileExistsError as exc:
+                        raise DuplicateRecordError(f"Record file already exists: {target}") from exc
+                    linked_targets.append(target)
+
+                # Cleanup temp files and fsync parent directories
+                for tmp_path, _ in staged_temps:
+                    with contextlib.suppress(OSError):
+                        tmp_path.unlink()
+                for d in touched_dirs:
+                    _fsync_directory(d)
+
+            except Exception:
+                # Full rollback of any targets promoted in this failed transaction
+                for target in reversed(linked_targets):
+                    with contextlib.suppress(OSError):
+                        target.unlink()
+                for tmp_path, _ in staged_temps:
+                    with contextlib.suppress(OSError):
+                        tmp_path.unlink()
+                raise
+
+            return [rec_id for rec_id, _, _ in plan]
 
     def append_batch(
         self,
@@ -221,7 +514,7 @@ class GitRecordStore(Store, OutcomeSink):
         *,
         batch_id: str | None = None,
     ) -> tuple[Path, list[str], list[str]]:
-        """Atomically append an immutable batch of OutcomeEvent records with a manifest.
+        """Atomically stage and publish an immutable batch of OutcomeEvent records with a manifest.
 
         Returns (batch_dir, appended_ids, deduplicated_existing_ids).
         """
@@ -231,85 +524,102 @@ class GitRecordStore(Store, OutcomeSink):
         if not is_safe_record_id(bid):
             raise StoreError(f"Unsafe batch_id: {bid!r}")
 
-        to_write: list[RecordDict] = []
-        deduped: list[str] = []
-        seen_in_batch: dict[str, str] = {}
+        with self._writer_lock():
+            to_write: list[RecordDict] = []
+            deduped: list[str] = []
+            seen_in_batch: dict[str, str] = {}
 
-        for ev in events:
-            if ev.get("kind") != RecordKind.OUTCOME_EVENT:
-                raise StoreError("Outcome batches only accept 'outcome_event' records.")
-            errors = validate_record_schema(ev)
-            if errors:
-                raise StoreError(
-                    f"Invalid outcome_event in batch: {'; '.join(e.message for e in errors)}"
-                )
-            rec_id = str(ev["record_id"])
-            if not is_safe_record_id(rec_id):
-                raise StoreError(f"Unsafe record_id: {rec_id!r}")
-            dedup_key = str(ev["body"]["dedup_key"])
-            body_digest = canonical_sha256(ev["body"])
-
-            existing = self._find_existing_dedup_key(dedup_key)
-            if existing is not None:
-                prev_id, prev_digest = existing
-                if prev_digest != body_digest:
-                    raise ConflictingDedupKeyError(
-                        f"Conflicting outcome_event for dedup_key {dedup_key!r} (existing {prev_id!r})."
+            for ev in events:
+                if ev.get("kind") != RecordKind.OUTCOME_EVENT:
+                    raise StoreError("Outcome batches only accept 'outcome_event' records.")
+                errors = validate_record_schema(ev)
+                if errors:
+                    raise StoreError(
+                        f"Invalid outcome_event in batch: {'; '.join(e.message for e in errors)}"
                     )
-                deduped.append(prev_id)
-                continue
+                rec_id = str(ev["record_id"])
+                if not is_safe_record_id(rec_id):
+                    raise StoreError(f"Unsafe record_id: {rec_id!r}")
+                dedup_key = str(ev["body"]["dedup_key"])
+                body_digest = canonical_sha256(ev["body"])
 
-            if dedup_key in seen_in_batch:
-                if seen_in_batch[dedup_key] != body_digest:
-                    raise ConflictingDedupKeyError(
-                        f"Conflicting duplicate dedup_key {dedup_key!r} within same batch."
+                existing = self._find_existing_dedup_key(dedup_key)
+                if existing is not None:
+                    prev_id, prev_digest = existing
+                    if prev_digest != body_digest:
+                        raise ConflictingDedupKeyError(
+                            f"Conflicting outcome_event for dedup_key {dedup_key!r} (existing {prev_id!r})."
+                        )
+                    deduped.append(prev_id)
+                    continue
+
+                if dedup_key in seen_in_batch:
+                    if seen_in_batch[dedup_key] != body_digest:
+                        raise ConflictingDedupKeyError(
+                            f"Conflicting duplicate dedup_key {dedup_key!r} within same batch."
+                        )
+                    continue
+
+                if self.get_record(rec_id) is not None:
+                    raise DuplicateRecordError(f"Record {rec_id!r} already exists.")
+
+                seen_in_batch[dedup_key] = body_digest
+                to_write.append(ev)
+
+            batch_dir = self.batches_dir / bid
+            if not to_write:
+                return batch_dir, [], deduped
+
+            if batch_dir.exists():
+                raise DuplicateRecordError(f"Batch directory already exists: {batch_dir}")
+
+            self.batches_dir.mkdir(parents=True, exist_ok=True)
+            _ensure_within_root(self.repo_path, self.batches_dir)
+            staging_dir = self.batches_dir / f".staging-{bid}-{secrets.token_hex(4)}"
+            staging_dir.mkdir(parents=False, exist_ok=False)
+
+            manifest_entries: list[dict[str, Any]] = []
+            appended_ids: list[str] = []
+            try:
+                for ev in to_write:
+                    rec_id = str(ev["record_id"])
+                    ev_path = staging_dir / f"{rec_id}.json"
+                    payload = json.dumps(ev, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+                    with ev_path.open("w", encoding="utf-8") as fh:
+                        fh.write(payload)
+                        fh.flush()
+                        os.fsync(fh.fileno())
+                    manifest_entries.append(
+                        {
+                            "record_id": rec_id,
+                            "file": ev_path.name,
+                            "record_sha256": canonical_sha256(ev),
+                            "dedup_key": str(ev["body"]["dedup_key"]),
+                        }
                     )
-                continue
+                    appended_ids.append(rec_id)
 
-            if self.get_record(rec_id) is not None:
-                raise DuplicateRecordError(f"Record {rec_id!r} already exists.")
-
-            seen_in_batch[dedup_key] = body_digest
-            to_write.append(ev)
-
-        batch_dir = self.batches_dir / bid
-        if not to_write:
-            return batch_dir, [], deduped
-
-        if batch_dir.exists():
-            raise DuplicateRecordError(f"Batch directory already exists: {batch_dir}")
-
-        batch_dir.mkdir(parents=True, exist_ok=False)
-        _ensure_within_root(self.repo_path, batch_dir)
-
-        manifest_entries: list[dict[str, Any]] = []
-        appended_ids: list[str] = []
-        for ev in to_write:
-            rec_id = str(ev["record_id"])
-            ev_path = batch_dir / f"{rec_id}.json"
-            payload = json.dumps(ev, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
-            ev_path.write_text(payload, encoding="utf-8")
-            manifest_entries.append(
-                {
-                    "record_id": rec_id,
-                    "file": ev_path.name,
-                    "record_sha256": canonical_sha256(ev),
-                    "dedup_key": str(ev["body"]["dedup_key"]),
+                manifest = {
+                    "batch_id": bid,
+                    "created_at": utc_now_iso(),
+                    "event_count": len(manifest_entries),
+                    "events": manifest_entries,
                 }
-            )
-            appended_ids.append(rec_id)
+                manifest_path = staging_dir / "manifest.json"
+                with manifest_path.open("w", encoding="utf-8") as fh:
+                    fh.write(json.dumps(manifest, indent=2, sort_keys=True, ensure_ascii=False) + "\n")
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                _fsync_directory(staging_dir)
 
-        manifest = {
-            "batch_id": bid,
-            "created_at": utc_now_iso(),
-            "event_count": len(manifest_entries),
-            "events": manifest_entries,
-        }
-        (batch_dir / "manifest.json").write_text(
-            json.dumps(manifest, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
-        return batch_dir, appended_ids, deduped
+                # Atomically publish completed batch directory
+                os.rename(str(staging_dir), str(batch_dir))
+                _fsync_directory(self.batches_dir)
+            except Exception:
+                shutil.rmtree(staging_dir, ignore_errors=True)
+                raise
+
+            return batch_dir, appended_ids, deduped
 
     def record_outcome(
         self, event: RecordDict, *, batch_id: str | None = None

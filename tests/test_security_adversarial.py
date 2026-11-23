@@ -202,7 +202,7 @@ def test_stale_revoked_unknown_authority_and_extensions_cannot_activate() -> Non
     )
     res = resolve_context(eff, ctx)
     assert res.state == ResolutionState.NONE
-    assert res.practices == []
+    assert res.practices == ()
 
 
 def test_no_network_guarantee_across_all_local_commands(
@@ -341,3 +341,29 @@ def test_missing_experiment_assignment_and_control_arm_leakage_rejected() -> Non
     r2 = validate_records([*records, assign_ctrl, ev_no_assign])
     assert not r2.valid
     assert any(i.code == "CONTROL_ARM_LEAKAGE" for i in r2.errors)
+
+
+def test_zero_external_agent_or_workflow_dependencies_in_source_tree() -> None:
+    """Static AST import audit: src/onemind must depend only on Python stdlib + jsonschema."""
+    import ast
+    import sys
+
+    src_root = Path(__file__).resolve().parents[1] / "src" / "onemind"
+    allowed_third_party = {"jsonschema", "onemind"}
+    stdlib = sys.stdlib_module_names
+
+    unexpected: list[tuple[str, str]] = []
+    for py_file in sorted(src_root.rglob("*.py")):
+        tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    top = alias.name.split(".", 1)[0]
+                    if top not in stdlib and top not in allowed_third_party:
+                        unexpected.append((str(py_file.relative_to(src_root)), top))
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                top = node.module.split(".", 1)[0]
+                if top not in stdlib and top not in allowed_third_party:
+                    unexpected.append((str(py_file.relative_to(src_root)), top))
+
+    assert unexpected == [], f"Unexpected third-party/framework imports found: {unexpected}"

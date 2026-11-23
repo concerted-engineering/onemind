@@ -1,4 +1,4 @@
-"""Offline, read-only local repository source scanner (instruction files and ADRs).
+"""Offline, read-only local repository source scanner & per-line provenance capture.
 
 SECURITY INVARIANTS:
 - Read-only: never modifies the repository or working tree.
@@ -31,6 +31,17 @@ from onemind.protocol.models import (
 from onemind.storage.mutation import get_head_commit
 
 DEFAULT_MAX_FILE_BYTES = 1_048_576  # 1 MiB
+
+CAPTURE_MODE_LEGEND: dict[str, str] = {
+    "heuristic-scan": (
+        "Automated offline keyword scan of local docs; unverified, may miss context "
+        "or produce false positives, and never activates practices."
+    ),
+    "explicit-capture": (
+        "Human-authored statement explicitly linked to a file/line anchor via `onemind propose` "
+        "or `propose_from_source()`; stored as an inert candidate and never activated automatically."
+    ),
+}
 
 _SKIP_DIRS: frozenset[str] = frozenset(
     {
@@ -79,6 +90,24 @@ _OWNER_RE = re.compile(
 
 
 @dataclass(frozen=True)
+class LineProvenance:
+    """Exact per-line provenance anchor for a local repository file."""
+
+    line_number: int
+    source_uri: str
+    line_sha256: str
+    text: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "line_number": self.line_number,
+            "source_uri": self.source_uri,
+            "line_sha256": self.line_sha256,
+            "text": self.text,
+        }
+
+
+@dataclass(frozen=True)
 class CandidateStatement:
     """A heuristically extracted normative statement from a local source file (always unverified)."""
 
@@ -86,15 +115,27 @@ class CandidateStatement:
     line_number: int
     text: str
     excerpt_sha256: str
+    source_uri: str = ""
+    line_end: int | None = None
+    file_sha256: str | None = None
+    source_revision: str | None = None
+    matched_signal: str = "normative-keyword"
+    capture_mode: str = "heuristic-scan"
     provenance: str = "heuristic-unverified"
     authority_class: str = AuthorityClass.UNVERIFIED_SOURCE.value
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "source_path": self.source_path,
+            "source_uri": self.source_uri or f"repo://{self.source_path}#L{self.line_number}",
             "line_number": self.line_number,
+            "line_end": self.line_end or self.line_number,
             "text": self.text,
             "excerpt_sha256": self.excerpt_sha256,
+            "file_sha256": self.file_sha256,
+            "source_revision": self.source_revision,
+            "matched_signal": self.matched_signal,
+            "capture_mode": self.capture_mode,
             "provenance": self.provenance,
             "authority_class": self.authority_class,
         }
@@ -110,6 +151,7 @@ class ScanReport:
     candidate_statements: list[CandidateStatement]
     warnings: list[str]
     existing_store_summary: dict[str, Any] = field(default_factory=dict)
+    capture_mode_legend: dict[str, str] = field(default_factory=lambda: dict(CAPTURE_MODE_LEGEND))
     assurances: tuple[str, ...] = (
         "No practices activated.",
         "No files modified.",
@@ -127,15 +169,14 @@ class ScanReport:
             "candidate_statements": [c.to_dict() for c in self.candidate_statements],
             "warnings": self.warnings,
             "existing_store_summary": self.existing_store_summary,
+            "capture_mode_legend": self.capture_mode_legend,
             "assurances": list(self.assurances),
         }
 
 
 def _sanitize_display_text(text: str) -> str:
     """Strip non-printable control characters (ANSI escapes, NULs) from untrusted text."""
-    # Remove ANSI escape sequences
     cleaned = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", text)
-    # Replace remaining control characters except space/tab
     cleaned = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", " ", cleaned)
     return cleaned.strip()
 
@@ -148,6 +189,21 @@ def _is_within_root(root: Path, candidate: Path) -> bool:
         return False
 
 
+def parse_source_spec(target: str) -> tuple[str, int | None, int | None]:
+    """Parse `path/to/file.md[:line[-end]]` into (path, line_start, line_end)."""
+    if ":" not in target:
+        return target, None, None
+    path_part, line_part = target.rsplit(":", 1)
+    if "-" in line_part:
+        a, b = line_part.split("-", 1)
+        if a.isdigit() and b.isdigit():
+            return path_part, int(a), int(b)
+    elif line_part.isdigit():
+        num = int(line_part)
+        return path_part, num, num
+    return target, None, None
+
+
 def _classify_source_type(rel_posix: str) -> str | None:
     name = Path(rel_posix).name
     if name in _INSTRUCTION_FILENAMES or rel_posix == ".github/copilot-instructions.md":
@@ -158,9 +214,13 @@ def _classify_source_type(rel_posix: str) -> str | None:
 
 
 def _extract_normative_statements(
-    rel_posix: str, text: str
+    rel_posix: str,
+    text: str,
+    *,
+    file_sha256: str | None = None,
+    source_revision: str | None = None,
 ) -> tuple[list[CandidateStatement], str | None]:
-    """Heuristically locate normative sentences outside fenced code blocks."""
+    """Heuristically locate normative sentences outside fenced code blocks with per-line anchors."""
     statements: list[CandidateStatement] = []
     owner: str | None = None
     in_code_fence = False
@@ -177,25 +237,151 @@ def _extract_normative_statements(
         if owner_match and owner is None:
             owner = _sanitize_display_text(owner_match.group(1))
 
-        # Skip markdown headings & HTML comments
         if stripped.startswith("#") or stripped.startswith("<!--"):
             continue
-        # Strip leading list bullet/number
         clean_line = re.sub(r"^(?:[-*+]|\d+\.)\s+", "", stripped)
         clean_line = _sanitize_display_text(clean_line)
         if len(clean_line) < 12 or len(clean_line) > 400:
             continue
-        if _NORMATIVE_RE.search(clean_line):
+        kw_match = _NORMATIVE_RE.search(clean_line)
+        if kw_match:
             statements.append(
                 CandidateStatement(
                     source_path=rel_posix,
+                    source_uri=f"repo://{rel_posix}#L{lineno}",
                     line_number=lineno,
+                    line_end=lineno,
                     text=clean_line,
                     excerpt_sha256=excerpt_sha256(clean_line),
+                    file_sha256=file_sha256,
+                    source_revision=source_revision,
+                    matched_signal=f"normative-keyword:{kw_match.group(1).upper()}",
+                    capture_mode="heuristic-scan",
                 )
             )
 
     return statements, owner
+
+
+def inspect_source_lines(
+    repo_root: Path,
+    source_spec: str,
+) -> dict[str, Any]:
+    """Read a repository source file (or line slice) safely with per-line SHA-256 provenance."""
+    raw_path, line_start, line_end = parse_source_spec(source_spec)
+    cand_path = Path(raw_path)
+    abs_path = cand_path if cand_path.is_absolute() else (repo_root / cand_path)
+    if ".." in Path(raw_path).parts or not _is_within_root(repo_root, abs_path):
+        raise ValueError(f"Source path {raw_path!r} escapes repository root {repo_root}.")
+    if abs_path.is_symlink() and not _is_within_root(repo_root, abs_path):
+        raise ValueError(f"Symlink {raw_path!r} escapes repository root {repo_root}.")
+    if not abs_path.is_file():
+        raise FileNotFoundError(f"Source file not found: {abs_path}")
+
+    rel_posix = abs_path.resolve().relative_to(repo_root).as_posix()
+    text = abs_path.read_text(encoding="utf-8")
+    all_lines = text.splitlines()
+    file_hash = excerpt_sha256(text)
+    head_commit = get_head_commit(repo_root)
+
+    if line_start is not None:
+        end = line_end if line_end is not None else line_start
+        if line_start < 1 or end < line_start or end > len(all_lines):
+            raise ValueError(
+                f"Line range {line_start}-{end} out of bounds for {rel_posix} ({len(all_lines)} lines)."
+            )
+        start_idx = line_start
+        end_idx = end
+    else:
+        start_idx = 1
+        end_idx = len(all_lines)
+
+    line_items: list[LineProvenance] = []
+    selected_raw_lines: list[str] = []
+    for ln in range(start_idx, end_idx + 1):
+        raw_ln = all_lines[ln - 1]
+        selected_raw_lines.append(raw_ln)
+        line_items.append(
+            LineProvenance(
+                line_number=ln,
+                source_uri=f"repo://{rel_posix}#L{ln}",
+                line_sha256=excerpt_sha256(raw_ln.strip()),
+                text=_sanitize_display_text(raw_ln),
+            )
+        )
+
+    excerpt = "\n".join(selected_raw_lines).strip()
+    stmts, owner = _extract_normative_statements(
+        rel_posix, text, file_sha256=file_hash, source_revision=head_commit
+    )
+    anchor = (
+        f"repo://{rel_posix}#L{start_idx}"
+        if start_idx == end_idx
+        else f"repo://{rel_posix}#L{start_idx}-L{end_idx}"
+    ) if line_start is not None else f"repo://{rel_posix}"
+
+    return {
+        "source_path": rel_posix,
+        "source_uri": anchor,
+        "source_id": f"{rel_posix}:{start_idx}" if line_start is not None else rel_posix,
+        "line_start": start_idx,
+        "line_end": end_idx,
+        "file_sha256": file_hash,
+        "excerpt_sha256": excerpt_sha256(excerpt),
+        "excerpt": excerpt,
+        "source_revision": head_commit,
+        "owner": owner or "unspecified",
+        "lines": line_items,
+        "heuristic_statements": stmts,
+    }
+
+
+def capture_source_evidence(
+    repo_root: Path,
+    source_spec: str,
+    *,
+    actor_id: str = "local-developer",
+    source_author: str | None = None,
+    created_at: str | None = None,
+    record_id: str | None = None,
+) -> RecordDict:
+    """Explicitly capture an inert Evidence record with per-line provenance from a real local file."""
+    info = inspect_source_lines(repo_root, source_spec)
+    now = created_at or utc_now_iso()
+    excerpt_text = str(info["excerpt"])
+    if info["line_start"] == 1 and info["line_end"] > 20 and ":" not in source_spec:
+        excerpt_text = excerpt_text[:500]
+    ev_body: dict[str, Any] = {
+        "source_type": "local-file",
+        "source_uri": info["source_uri"],
+        "source_id": info["source_id"],
+        "observed_at": now,
+        "source_author": source_author or info["owner"] or "repo-maintainer",
+        "excerpt_sha256": excerpt_sha256(excerpt_text),
+        "source_state": "available",
+        "redacted_snapshot": excerpt_text,
+    }
+    if info["source_revision"]:
+        ev_body["source_revision"] = info["source_revision"]
+
+    line_provenance = [lp.to_dict() for lp in info["lines"][:50]]
+    return make_envelope(
+        kind=RecordKind.EVIDENCE,
+        body=ev_body,
+        actor_type=ActorType.HUMAN,
+        actor_id=actor_id,
+        record_id=record_id or generate_record_id("ev"),
+        created_at=now,
+        extensions={
+            "source_provenance": {
+                "capture_mode": "explicit-capture",
+                "file_sha256": info["file_sha256"],
+                "line_start": info["line_start"],
+                "line_end": info["line_end"],
+                "lines": line_provenance,
+            }
+        },
+    )
 
 
 def scan_repository(
@@ -204,17 +390,16 @@ def scan_repository(
     include_paths: Sequence[str] = (),
     max_file_bytes: int = DEFAULT_MAX_FILE_BYTES,
 ) -> ScanReport:
-    """Perform an offline, read-only scan of local instruction files and ADRs."""
+    """Perform an offline, read-only scan of local instruction files and ADRs with per-line provenance."""
     root = Path(repo_path).resolve()
     if not root.is_dir():
         raise FileNotFoundError(f"Repository path does not exist or is not a directory: {repo_path}")
 
     head_commit = get_head_commit(root)
     warnings: list[str] = []
-    candidate_paths: list[tuple[Path, str, str]] = []  # (abs_path, rel_posix, source_type)
+    candidate_paths: list[tuple[Path, str, str]] = []
     seen_rel: set[str] = set()
 
-    # Walk repository without following directory symlinks (prevents symlink loops/escapes)
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
         dirnames[:] = sorted(d for d in dirnames if d not in _SKIP_DIRS)
         cur_dir = Path(dirpath)
@@ -229,7 +414,6 @@ def scan_repository(
                 seen_rel.add(rel_posix)
                 candidate_paths.append((fpath, rel_posix, src_type))
 
-    # Add explicit user-specified paths (strictly checked against traversal)
     for inc in include_paths:
         inc_path = Path(inc)
         abs_inc = inc_path if inc_path.is_absolute() else root / inc_path
@@ -261,7 +445,6 @@ def scan_repository(
     content_hashes: dict[str, list[str]] = {}
 
     for fpath, rel_posix, src_type in candidate_paths:
-        # Symlink escape check
         if fpath.is_symlink():
             if not _is_within_root(root, fpath):
                 warnings.append(
@@ -365,7 +548,9 @@ def scan_repository(
         content_hashes.setdefault(file_hash, []).append(rel_posix)
         line_count = len(text.splitlines())
 
-        stmts, owner = _extract_normative_statements(rel_posix, text)
+        stmts, owner = _extract_normative_statements(
+            rel_posix, text, file_sha256=file_hash, source_revision=head_commit
+        )
         all_statements.extend(stmts)
 
         if stmts and owner is None:
@@ -388,6 +573,8 @@ def scan_repository(
                     "size_bytes": size,
                     "line_count": line_count,
                     "candidate_statement_count": len(stmts),
+                    "capture_mode": "heuristic-scan",
+                    "matched_lines": [s.line_number for s in stmts],
                     "authority_class": AuthorityClass.UNVERIFIED_SOURCE.value,
                 },
             )
@@ -399,7 +586,6 @@ def scan_repository(
                 f"Duplicate source content detected (sha256={digest[:12]}...): {', '.join(paths)}"
             )
 
-    # Summarize any existing .onemind/ records without modifying anything
     store_summary: dict[str, Any] = {"present": False, "record_files": 0}
     records_dir = root / ".onemind" / "records"
     if records_dir.is_dir():
@@ -437,7 +623,7 @@ class LocalFilesSourceAdapter(SourceAdapter):
         for stmt in report.candidate_statements:
             body: dict[str, Any] = {
                 "source_type": "local-file",
-                "source_uri": f"repo://{stmt.source_path}#L{stmt.line_number}",
+                "source_uri": stmt.source_uri or f"repo://{stmt.source_path}#L{stmt.line_number}",
                 "source_id": f"{stmt.source_path}:{stmt.line_number}",
                 "observed_at": now,
                 "source_author": "unspecified",
@@ -455,6 +641,15 @@ class LocalFilesSourceAdapter(SourceAdapter):
                     actor_id=f"adapter:{self.name}",
                     record_id=generate_record_id("ev"),
                     created_at=now,
+                    extensions={
+                        "source_provenance": {
+                            "capture_mode": "heuristic-scan",
+                            "matched_signal": stmt.matched_signal,
+                            "line_start": stmt.line_number,
+                            "line_end": stmt.line_number,
+                            "file_sha256": stmt.file_sha256,
+                        }
+                    },
                 )
             )
 

@@ -99,7 +99,7 @@ def test_two_unrelated_workflow_fixtures_share_common_adapter_contract(tmp_path:
         allow_local_assertions=True,
     )
     assert res.state == ResolutionState.NONE
-    assert res.practices == []
+    assert res.practices == ()
 
     # 4. Independent removability: reading canonical records from a fresh store/engine
     #    without referencing either adapter works cleanly and reproduces identical query/report results.

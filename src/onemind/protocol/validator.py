@@ -15,11 +15,16 @@ from onemind.protocol.models import (
     RecordDict,
     RecordKind,
     is_safe_record_id,
+    parse_rfc3339,
 )
 from onemind.protocol.schema import validate_record_schema
-from onemind.protocol.scope import is_scope_subset
+from onemind.protocol.scope import is_scope_subset, validate_scope_structure
 
 Severity = Literal["error", "warning"]
+
+KNOWN_AUTHORITY_MODES: frozenset[str] = frozenset(
+    {"local-owner-assertion", "verified-repository-approval"}
+)
 
 
 @dataclass(frozen=True)
@@ -159,40 +164,77 @@ def validate_records(
         digests_by_id[rec_id] = digest
         valid_records.append(rec)
 
-    # Track uniqueness constraints across versions and dedup keys
+    # Pre-index version chains and experiment assignments
     seen_practice_versions: dict[tuple[str, int], str] = {}
     seen_app_versions: dict[tuple[str, int], str] = {}
     seen_dedup_keys: dict[str, tuple[str, str]] = {}
-    # Track experiment assignments: (experiment_id, repo_id, pr_id) -> (arm, record_id)
-    assignments_by_pr: dict[tuple[str, str, str], tuple[str | None, str]] = {}
+    # (experiment_id, repo_id, pr_id) -> (arm, record_id, observed_at_str)
+    assignments_by_pr: dict[tuple[str, str, str], tuple[str | None, str, str]] = {}
+    # (target_record_id, effective_at) -> list[(action, record_id)]
+    decisions_at_instant: dict[tuple[str, str], list[tuple[str, str]]] = {}
 
-    # Pre-index outcome assignment events
     for rec in valid_records:
-        if rec["kind"] != RecordKind.OUTCOME_EVENT:
-            continue
-        ev_body: dict[str, Any] = rec["body"]
-        exp_id = ev_body.get("experiment_id")
-        if exp_id and ev_body.get("event_type") == "assignment":
-            key = (str(exp_id), str(ev_body["repo_id"]), str(ev_body["pr_id"]))
-            arm = ev_body.get("details", {}).get("arm")
-            if key in assignments_by_pr:
-                prev_arm, prev_id = assignments_by_pr[key]
-                if prev_arm != arm:
+        if rec["kind"] == RecordKind.APPLICATION:
+            ab = rec["body"]
+            app_key = (str(ab["application_id"]), int(ab["application_version"]))
+            if app_key in seen_app_versions:
+                issues.append(
+                    ValidationIssue(
+                        code="DUPLICATE_APPLICATION_VERSION",
+                        severity="error",
+                        message=(
+                            f"Duplicate application version ({app_key[0]!r}, v{app_key[1]}); "
+                            f"already defined by {seen_app_versions[app_key]!r}."
+                        ),
+                        record_id=rec["record_id"],
+                        field_path="body.application_version",
+                    )
+                )
+            else:
+                seen_app_versions[app_key] = rec["record_id"]
+
+        elif rec["kind"] == RecordKind.OUTCOME_EVENT:
+            ev_body: dict[str, Any] = rec["body"]
+            exp_id = ev_body.get("experiment_id")
+            if exp_id and ev_body.get("event_type") == "assignment":
+                key = (str(exp_id), str(ev_body["repo_id"]), str(ev_body["pr_id"]))
+                arm = ev_body.get("details", {}).get("arm")
+                obs_at = str(ev_body["observed_at"])
+                if arm not in ("treatment", "control"):
                     issues.append(
                         ValidationIssue(
-                            code="EXPERIMENT_ASSIGNMENT_CHANGED",
+                            code="INVALID_EXPERIMENT_ARM",
                             severity="error",
                             message=(
-                                f"Experiment assignment for {key} changed from {prev_arm!r} "
-                                f"({prev_id}) to {arm!r} ({rec['record_id']}); assignment must "
-                                "remain immutable across PR revisions."
+                                f"Experiment assignment {rec['record_id']!r} must declare "
+                                f"details.arm in ('treatment', 'control'), got {arm!r}."
                             ),
                             record_id=rec["record_id"],
                             field_path="body.details.arm",
                         )
                     )
-            else:
-                assignments_by_pr[key] = (arm, rec["record_id"])
+                if key in assignments_by_pr:
+                    prev_arm, prev_id, _ = assignments_by_pr[key]
+                    if prev_arm != arm:
+                        issues.append(
+                            ValidationIssue(
+                                code="EXPERIMENT_ASSIGNMENT_CHANGED",
+                                severity="error",
+                                message=(
+                                    f"Experiment assignment for {key} changed from {prev_arm!r} "
+                                    f"({prev_id}) to {arm!r} ({rec['record_id']}); assignment must "
+                                    "remain immutable across PR revisions."
+                                ),
+                                record_id=rec["record_id"],
+                                field_path="body.details.arm",
+                            )
+                        )
+                else:
+                    assignments_by_pr[key] = (
+                        str(arm) if isinstance(arm, str) else None,
+                        rec["record_id"],
+                        obs_at,
+                    )
 
     # Pass 2: Semantic cross-record validation
     for rec in valid_records:
@@ -219,7 +261,7 @@ def validate_records(
 
         elif kind == RecordKind.GOVERNANCE_DECISION:
             _validate_governance_decision(
-                rec, by_id, digests_by_id, issues
+                rec, by_id, digests_by_id, decisions_at_instant, issues
             )
 
         elif kind == RecordKind.OUTCOME_EVENT:
@@ -231,6 +273,26 @@ def validate_records(
                 seen_dedup_keys,
                 assignments_by_pr,
                 issues,
+            )
+
+    # Pass 3: Detect contradictory simultaneous governance decisions
+    for (target_id, eff_at), entries in sorted(decisions_at_instant.items()):
+        actions = {a for a, _ in entries}
+        if len(actions) > 1:
+            rec_ids = [rid for _, rid in entries]
+            issues.append(
+                ValidationIssue(
+                    code="AMBIGUOUS_SIMULTANEOUS_DECISIONS",
+                    severity="warning",
+                    message=(
+                        f"Multiple governance decisions target {target_id!r} at identical "
+                        f"effective_at={eff_at!r} with conflicting actions {sorted(actions)!r} "
+                        f"({rec_ids}); replay requires committed ledger sequencing or fails closed to ambiguous."
+                    ),
+                    record_id=rec_ids[0],
+                    field_path="body.effective_at",
+                    details={"target_record_id": target_id, "decision_ids": rec_ids},
+                )
             )
 
     has_errors = any(i.severity == "error" for i in issues)
@@ -301,6 +363,18 @@ def _validate_practice_candidate(
     by_id: dict[str, RecordDict],
     issues: list[ValidationIssue],
 ) -> None:
+    scope_ok, scope_reason = validate_scope_structure(body.get("proposed_scope"))
+    if not scope_ok:
+        issues.append(
+            ValidationIssue(
+                code="AMBIGUOUS_SCOPE",
+                severity="error",
+                message=f"PracticeCandidate proposed_scope invalid/ambiguous: {scope_reason}",
+                record_id=rec_id,
+                field_path="body.proposed_scope",
+            )
+        )
+
     for ev_id in body.get("evidence_ids", []):
         target = by_id.get(ev_id)
         if target is None:
@@ -338,6 +412,42 @@ def _validate_practice_version(
     practice_id = str(body["practice_id"])
     version = int(body["version"])
     ver_key = (practice_id, version)
+
+    scope_ok, scope_reason = validate_scope_structure(body.get("scope"))
+    if not scope_ok:
+        issues.append(
+            ValidationIssue(
+                code="AMBIGUOUS_SCOPE",
+                severity="error",
+                message=f"PracticeVersion scope invalid/ambiguous: {scope_reason}",
+                record_id=rec_id,
+                field_path="body.scope",
+            )
+        )
+
+    for exc_idx, exc_entry in enumerate(body.get("exceptions", [])):
+        if not isinstance(exc_entry, dict) or not exc_entry:
+            issues.append(
+                ValidationIssue(
+                    code="MALFORMED_EXCEPTION",
+                    severity="error",
+                    message=f"PracticeVersion exception[{exc_idx}] must be a non-empty structured object.",
+                    record_id=rec_id,
+                    field_path=f"body.exceptions[{exc_idx}]",
+                )
+            )
+        elif "scope" in exc_entry:
+            ex_ok, ex_reason = is_scope_subset(exc_entry["scope"], body["scope"])
+            if not ex_ok:
+                issues.append(
+                    ValidationIssue(
+                        code="EXCEPTION_SCOPE_OVERREACH",
+                        severity="error",
+                        message=f"PracticeVersion exception[{exc_idx}] scope exceeds practice scope: {ex_reason}",
+                        record_id=rec_id,
+                        field_path=f"body.exceptions[{exc_idx}].scope",
+                    )
+                )
 
     if ver_key in seen_versions:
         issues.append(
@@ -504,23 +614,63 @@ def _validate_application(
 ) -> None:
     app_id = str(body["application_id"])
     app_ver = int(body["application_version"])
-    ver_key = (app_id, app_ver)
 
-    if ver_key in seen_app_versions:
+    # Monotonic application version chain check: vN (N > 1) requires v(N-1)
+    if app_ver > 1 and (app_id, app_ver - 1) not in seen_app_versions:
         issues.append(
             ValidationIssue(
-                code="DUPLICATE_APPLICATION_VERSION",
+                code="INVALID_APPLICATION_VERSION_CHAIN",
                 severity="error",
                 message=(
-                    f"Duplicate application version ({app_id!r}, v{app_ver}); "
-                    f"already defined by {seen_app_versions[ver_key]!r}."
+                    f"Application ({app_id!r}, v{app_ver}) is missing predecessor "
+                    f"version ({app_id!r}, v{app_ver - 1})."
                 ),
                 record_id=rec_id,
                 field_path="body.application_version",
             )
         )
-    else:
-        seen_app_versions[ver_key] = rec_id
+
+    # Optional explicit previous_version_id linkage on Application
+    prev_app_id = body.get("previous_version_id")
+    if prev_app_id is not None:
+        if app_ver == 1:
+            issues.append(
+                ValidationIssue(
+                    code="INVALID_APPLICATION_VERSION_CHAIN",
+                    severity="error",
+                    message="Application with application_version=1 must not set previous_version_id.",
+                    record_id=rec_id,
+                    field_path="body.previous_version_id",
+                )
+            )
+        else:
+            prev_app = by_id.get(str(prev_app_id))
+            if prev_app is None or prev_app.get("kind") != RecordKind.APPLICATION:
+                issues.append(
+                    ValidationIssue(
+                        code="DANGLING_REFERENCE",
+                        severity="error",
+                        message=f"Application previous_version_id {prev_app_id!r} does not reference an existing application.",
+                        record_id=rec_id,
+                        field_path="body.previous_version_id",
+                    )
+                )
+            elif (
+                prev_app["body"].get("application_id") != app_id
+                or prev_app["body"].get("application_version") != app_ver - 1
+            ):
+                issues.append(
+                    ValidationIssue(
+                        code="INVALID_APPLICATION_VERSION_CHAIN",
+                        severity="error",
+                        message=(
+                            f"Application previous_version_id {prev_app_id!r} does not match "
+                            f"({app_id!r}, v{app_ver - 1})."
+                        ),
+                        record_id=rec_id,
+                        field_path="body.previous_version_id",
+                    )
+                )
 
     pv_id = str(body["practice_version_id"])
     pv = by_id.get(pv_id)
@@ -550,7 +700,7 @@ def _validate_application(
         )
         return
 
-    # Critical governance invariant: Application scope cannot exceed PracticeVersion scope.
+    # Critical governance invariant: Application scope cannot exceed PracticeVersion scope (fail-closed).
     ok, reason = is_scope_subset(body["applicability"], pv["body"]["scope"])
     if not ok:
         issues.append(
@@ -571,6 +721,24 @@ def _validate_conflict(
     by_id: dict[str, RecordDict],
     issues: list[ValidationIssue],
 ) -> None:
+    detector = body.get("detector")
+    if (
+        not isinstance(detector, dict)
+        or not isinstance(detector.get("name"), str)
+        or not detector["name"].strip()
+        or not isinstance(detector.get("version"), str)
+        or not detector["version"].strip()
+    ):
+        issues.append(
+            ValidationIssue(
+                code="INCOMPLETE_CONFLICT_DETECTOR",
+                severity="error",
+                message="Conflict detector metadata must specify non-empty string 'name' and 'version'.",
+                record_id=rec_id,
+                field_path="body.detector",
+            )
+        )
+
     left_id = str(body["left_record_id"])
     right_id = str(body["right_record_id"])
     if left_id == right_id:
@@ -642,6 +810,7 @@ def _validate_governance_decision(
     rec: RecordDict,
     by_id: dict[str, RecordDict],
     digests_by_id: dict[str, str],
+    decisions_at_instant: dict[tuple[str, str], list[tuple[str, str]]],
     issues: list[ValidationIssue],
 ) -> None:
     rec_id = str(rec["record_id"])
@@ -664,6 +833,9 @@ def _validate_governance_decision(
     target_kind = str(body["target_kind"])
     action = str(body["action"])
     declared_sha = str(body["target_sha256"])
+    effective_at = str(body["effective_at"])
+
+    decisions_at_instant.setdefault((target_id, effective_at), []).append((action, rec_id))
 
     target = by_id.get(target_id)
     if target is None:
@@ -691,6 +863,24 @@ def _validate_governance_decision(
                 field_path="body.target_kind",
             )
         )
+
+    # Backdated governance check: effective_at cannot predate target record creation
+    try:
+        if parse_rfc3339(effective_at) < parse_rfc3339(str(target["created_at"])):
+            issues.append(
+                ValidationIssue(
+                    code="BACKDATED_GOVERNANCE_DECISION",
+                    severity="error",
+                    message=(
+                        f"GovernanceDecision effective_at ({effective_at}) predates target "
+                        f"{target_id!r} created_at ({target['created_at']})."
+                    ),
+                    record_id=rec_id,
+                    field_path="body.effective_at",
+                )
+            )
+    except ValueError:
+        pass
 
     # Critical governance invariant: approvals and decisions bind to exact canonical SHA-256 digest.
     actual_sha = digests_by_id.get(target_id)
@@ -740,24 +930,83 @@ def _validate_governance_decision(
         resolution = body.get("resolution", {})
         if resolution.get("disposition") == AdjudicationDisposition.SCOPED_EXCEPTION:
             exc_scope = resolution.get("exception_scope")
-            if not isinstance(exc_scope, dict) or not exc_scope.get("repository"):
+            sc_ok, sc_reason = validate_scope_structure(exc_scope)
+            if not sc_ok:
                 issues.append(
                     ValidationIssue(
                         code="AMBIGUOUS_SCOPED_EXCEPTION",
                         severity="error",
                         message=(
                             "Adjudication with disposition='scoped-exception' must specify "
-                            "an unambiguous 'resolution.exception_scope' with 'repository'."
+                            f"an unambiguous 'resolution.exception_scope': {sc_reason}"
                         ),
                         record_id=rec_id,
                         field_path="body.resolution.exception_scope",
                     )
                 )
+            excepted_id = resolution.get("excepted_record_id")
+            valid_sides = {
+                str(target["body"].get("left_record_id")),
+                str(target["body"].get("right_record_id")),
+            }
+            if not isinstance(excepted_id, str) or excepted_id not in valid_sides:
+                issues.append(
+                    ValidationIssue(
+                        code="AMBIGUOUS_SCOPED_EXCEPTION",
+                        severity="error",
+                        message=(
+                            "Adjudication with disposition='scoped-exception' must explicitly "
+                            f"identify 'resolution.excepted_record_id' in {sorted(valid_sides)!r}."
+                        ),
+                        record_id=rec_id,
+                        field_path="body.resolution.excepted_record_id",
+                    )
+                )
+            elif sc_ok:
+                excepted_rec = by_id.get(excepted_id)
+                if excepted_rec and excepted_rec.get("kind") == RecordKind.PRACTICE_VERSION:
+                    sub_ok, sub_reason = is_scope_subset(exc_scope, excepted_rec["body"]["scope"])
+                    if not sub_ok:
+                        issues.append(
+                            ValidationIssue(
+                                code="EXCEPTION_SCOPE_OVERREACH",
+                                severity="error",
+                                message=(
+                                    f"Scoped exception exceeds excepted practice {excepted_id!r} "
+                                    f"scope: {sub_reason}"
+                                ),
+                                record_id=rec_id,
+                                field_path="body.resolution.exception_scope",
+                            )
+                        )
 
-    # Authority vs proof consistency: local-owner-assertion must never claim verified_repository_approval=True
+    # Authority vs proof consistency
     authority = body.get("authority", {})
     proof = body.get("proof", {})
     auth_mode = authority.get("mode")
+    if auth_mode not in KNOWN_AUTHORITY_MODES:
+        issues.append(
+            ValidationIssue(
+                code="UNKNOWN_AUTHORITY_MODE",
+                severity="warning",
+                message=(
+                    f"GovernanceDecision uses unrecognized authority.mode {auth_mode!r}; "
+                    "verifier will fail closed (non-activation)."
+                ),
+                record_id=rec_id,
+                field_path="body.authority.mode",
+            )
+        )
+    if not isinstance(proof, dict) or not proof:
+        issues.append(
+            ValidationIssue(
+                code="EMPTY_GOVERNANCE_PROOF",
+                severity="warning",
+                message="GovernanceDecision has empty proof object; verifier will fail closed.",
+                record_id=rec_id,
+                field_path="body.proof",
+            )
+        )
     if auth_mode == "local-owner-assertion" and proof.get("verified_repository_approval") is True:
         issues.append(
             ValidationIssue(
@@ -779,7 +1028,7 @@ def _validate_outcome_event(
     record_digest: str,
     by_id: dict[str, RecordDict],
     seen_dedup_keys: dict[str, tuple[str, str]],
-    assignments_by_pr: dict[tuple[str, str, str], tuple[str | None, str]],
+    assignments_by_pr: dict[tuple[str, str, str], tuple[str | None, str, str]],
     issues: list[ValidationIssue],
 ) -> None:
     pv_id = str(body["practice_version_id"])
@@ -834,19 +1083,70 @@ def _validate_outcome_event(
                 field_path="body.application_record_id",
             )
         )
-    elif app["body"].get("practice_version_id") != pv_id:
-        issues.append(
-            ValidationIssue(
-                code="APPLICATION_PRACTICE_MISMATCH",
-                severity="error",
-                message=(
-                    f"OutcomeEvent application_record_id {app_id!r} belongs to practice_version "
-                    f"{app['body'].get('practice_version_id')!r}, not {pv_id!r}."
-                ),
-                record_id=rec_id,
-                field_path="body.application_record_id",
+    else:
+        app_body = app["body"]
+        if app_body.get("practice_version_id") != pv_id:
+            issues.append(
+                ValidationIssue(
+                    code="APPLICATION_PRACTICE_MISMATCH",
+                    severity="error",
+                    message=(
+                        f"OutcomeEvent application_record_id {app_id!r} belongs to practice_version "
+                        f"{app_body.get('practice_version_id')!r}, not {pv_id!r}."
+                    ),
+                    record_id=rec_id,
+                    field_path="body.application_record_id",
+                )
             )
-        )
+        # Outcome provenance: repo_id and checker_version must match Application
+        app_repo = app_body.get("applicability", {}).get("repository")
+        if app_repo and body.get("repo_id") != app_repo:
+            issues.append(
+                ValidationIssue(
+                    code="OUTCOME_REPOSITORY_MISMATCH",
+                    severity="error",
+                    message=(
+                        f"OutcomeEvent repo_id {body.get('repo_id')!r} does not match "
+                        f"application repository {app_repo!r}."
+                    ),
+                    record_id=rec_id,
+                    field_path="body.repo_id",
+                )
+            )
+        detection = app_body.get("detection")
+        if (
+            isinstance(detection, dict)
+            and detection.get("version")
+            and str(body.get("checker_version")) != str(detection["version"])
+        ):
+            issues.append(
+                ValidationIssue(
+                    code="OUTCOME_CHECKER_VERSION_MISMATCH",
+                    severity="error",
+                    message=(
+                        f"OutcomeEvent checker_version {body.get('checker_version')!r} does not "
+                        f"match application detection.version {detection['version']!r}."
+                    ),
+                    record_id=rec_id,
+                    field_path="body.checker_version",
+                )
+            )
+        try:
+            if parse_rfc3339(str(body["observed_at"])) < parse_rfc3339(str(app["created_at"])):
+                issues.append(
+                    ValidationIssue(
+                        code="OUTCOME_PREDATES_APPLICATION",
+                        severity="error",
+                        message=(
+                            f"OutcomeEvent observed_at ({body['observed_at']}) predates "
+                            f"application {app_id!r} created_at ({app['created_at']})."
+                        ),
+                        record_id=rec_id,
+                        field_path="body.observed_at",
+                    )
+                )
+        except ValueError:
+            pass
 
     dedup_key = str(body["dedup_key"])
     if dedup_key in seen_dedup_keys:
@@ -880,7 +1180,7 @@ def _validate_outcome_event(
             )
         )
 
-    # Experiment assignment invariant
+    # Experiment assignment invariant: persisted before intervention & no control-arm leakage
     exp_id = body.get("experiment_id")
     intervention_events = {"alert", "action", "repeat-correction", "false-alert-adjudication"}
     if exp_id and event_type in intervention_events:
@@ -899,7 +1199,23 @@ def _validate_outcome_event(
                 )
             )
         else:
-            arm, _ = assignments_by_pr[key]
+            arm, assign_id, assign_obs = assignments_by_pr[key]
+            try:
+                if parse_rfc3339(str(body["observed_at"])) < parse_rfc3339(assign_obs):
+                    issues.append(
+                        ValidationIssue(
+                            code="ASSIGNMENT_AFTER_INTERVENTION",
+                            severity="error",
+                            message=(
+                                f"OutcomeEvent {event_type!r} observed_at ({body['observed_at']}) "
+                                f"precedes assignment {assign_id!r} ({assign_obs})."
+                            ),
+                            record_id=rec_id,
+                            field_path="body.observed_at",
+                        )
+                    )
+            except ValueError:
+                pass
             if arm == "control" and event_type == "alert" and details.get("published_to_pr") is True:
                 issues.append(
                     ValidationIssue(

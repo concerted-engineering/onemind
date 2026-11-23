@@ -88,23 +88,38 @@ onemind validate . --records-file examples/records.json
 
 All commands support `--json` for automation and use deterministic exit codes: `0` (ok/pass), `1` (validated finding/error), `2` (invalid usage/input), `3` (indeterminate/incomplete).
 
-## Logical Python API (Transport-Independent)
+## Logical Python API (Transport-Independent, Immutable Objects)
 
 ```python
-from onemind.engine import OneMindEngine
+from onemind import ResolutionContext, propose_from_source, query, resolve
 from onemind.governance.policy import AuthorityPolicy
 from onemind.storage.git_store import GitRecordStore
 
 store = GitRecordStore("examples/api-compat-demo")
-engine = OneMindEngine(store, policy=AuthorityPolicy(allow_local_assertions=True))
 
-# Read-only resolution with provenance
-res = engine.resolve({
-    "repository": "examples/api-compat-demo",
-    "paths": ["api/schemas/orders_v1_breaking.json"],
-    "languages": ["json"],
-})
+# Read-only resolution returning deeply immutable objects with explicit provenance
+res = resolve(
+    store,
+    ResolutionContext(
+        repository="examples/api-compat-demo",
+        paths=("api/schemas/orders_v1_breaking.json",),
+        languages=("json",),
+    ),
+    policy=AuthorityPolicy(allow_local_assertions=True),
+)
 print(res.state, len(res.practices), len(res.applications))
+
+# Explicit dry-run candidate capture linked to an exact file/line anchor (never activates)
+draft = propose_from_source(
+    store,
+    "examples/api-compat-demo",
+    statement="Previously required response fields in /v1/orders must remain required.",
+    evidence_specs=["docs/adr/0001-public-api-response-compatibility.md:16"],
+    scope_repository="examples/api-compat-demo",
+    scope_paths=["api/schemas/**"],
+    write=False,
+)
+print(draft.valid, draft.written)
 ```
 
 ## Generic Workflow Composability
@@ -113,6 +128,7 @@ OneMind defines minimal interfaces in [`src/onemind/adapters/interfaces.py`](src
 
 ## Documentation
 
+- [`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md) — Current M0 + M1 implementation status, verified capabilities, and limitations
 - [`spec/01-record-protocol.md`](spec/01-record-protocol.md) — Draft record protocol (`0.1-draft` experimental)
 - [`spec/record.schema.json`](spec/record.schema.json) — JSON Schema 2020-12 structural schema
 - [`docs/architecture.md`](docs/architecture.md) — M0 + M1 architecture and replay model

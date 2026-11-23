@@ -19,16 +19,22 @@ from onemind.adapters.json_observation import (
     JsonObservationAdapter,
 )
 from onemind.adapters.local_files import (
+    CAPTURE_MODE_LEGEND,
     DEFAULT_MAX_FILE_BYTES,
     CandidateStatement,
+    LineProvenance,
     LocalFilesSourceAdapter,
     ScanReport,
+    capture_source_evidence,
+    inspect_source_lines,
+    parse_source_spec,
     scan_repository,
 )
 from onemind.adapters.markdown_retro import MarkdownRetroAdapter
 from onemind.adapters.reporter import SummaryReporter
 
 __all__ = [
+    "CAPTURE_MODE_LEGEND",
     "DEFAULT_MAX_FILE_BYTES",
     "SUPPORTED_OBSERVATION_SCHEMA",
     "ApplicationAdapter",
@@ -40,6 +46,7 @@ __all__ = [
     "Extractor",
     "IngestionResult",
     "JsonObservationAdapter",
+    "LineProvenance",
     "LocalFilesSourceAdapter",
     "MarkdownRetroAdapter",
     "OutcomeSink",
@@ -49,5 +56,8 @@ __all__ = [
     "SourceInventoryItem",
     "Store",
     "SummaryReporter",
+    "capture_source_evidence",
+    "inspect_source_lines",
+    "parse_source_spec",
     "scan_repository",
 ]

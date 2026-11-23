@@ -1,8 +1,8 @@
-"""Deterministic EffectiveView(c, t, p) projection and context resolution."""
+"""Deterministic EffectiveView(c, t, p) projection and fail-closed context resolution."""
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -20,10 +20,16 @@ from onemind.protocol.models import (
     RecordDict,
     RecordKind,
     ResolutionState,
+    freeze_value,
     parse_rfc3339,
+    unfreeze_value,
     utc_now_iso,
 )
-from onemind.protocol.scope import is_scope_subset, scope_matches_context
+from onemind.protocol.scope import (
+    evaluate_scope_applicability,
+    is_scope_subset,
+    scope_matches_context,
+)
 from onemind.protocol.validator import ValidationReport, validate_records
 
 
@@ -53,7 +59,7 @@ class TargetState:
 
 @dataclass(frozen=True)
 class AdjudicationState:
-    """Projected resolution state of a Conflict record."""
+    """Immutable projected resolution state of a Conflict record."""
 
     conflict_record_id: str
     left_record_id: str
@@ -62,10 +68,11 @@ class AdjudicationState:
     adjudicated: bool
     disposition: str | None = None
     explanation: str | None = None
-    exception_scope: dict[str, Any] | None = None
+    exception_scope: Mapping[str, Any] | None = None
     excepted_record_id: str | None = None
     decision_record_id: str | None = None
     authority_class: AuthorityClass = AuthorityClass.UNAPPROVED
+    ambiguous_adjudication: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -76,14 +83,15 @@ class AdjudicationState:
             "adjudicated": self.adjudicated,
             "disposition": self.disposition,
             "explanation": self.explanation,
-            "exception_scope": self.exception_scope,
+            "exception_scope": unfreeze_value(self.exception_scope) if self.exception_scope else None,
             "excepted_record_id": self.excepted_record_id,
             "decision_record_id": self.decision_record_id,
             "authority_class": self.authority_class.value,
+            "ambiguous_adjudication": self.ambiguous_adjudication,
         }
 
 
-@dataclass
+@dataclass(frozen=True)
 class EffectiveState:
     """Deterministic projected state of all governed practices, applications, and conflicts."""
 
@@ -92,12 +100,12 @@ class EffectiveState:
     policy: AuthorityPolicy
     computation_version: str
     indeterminate: bool
-    indeterminate_reasons: list[str]
-    records_by_id: dict[str, RecordDict]
-    practice_states: dict[str, TargetState]
-    application_states: dict[str, TargetState]
-    conflict_states: dict[str, AdjudicationState]
-    verification_log: list[AuthorityVerificationResult]
+    indeterminate_reasons: tuple[str, ...]
+    records_by_id: Mapping[str, RecordDict]
+    practice_states: Mapping[str, TargetState]
+    application_states: Mapping[str, TargetState]
+    conflict_states: Mapping[str, AdjudicationState]
+    verification_log: tuple[AuthorityVerificationResult, ...]
     validation_report: ValidationReport
 
     def to_dict(self) -> dict[str, Any]:
@@ -107,7 +115,7 @@ class EffectiveState:
             "policy_version": self.policy.policy_version,
             "computation_version": self.computation_version,
             "indeterminate": self.indeterminate,
-            "indeterminate_reasons": self.indeterminate_reasons,
+            "indeterminate_reasons": list(self.indeterminate_reasons),
             "practice_states": {k: v.to_dict() for k, v in sorted(self.practice_states.items())},
             "application_states": {
                 k: v.to_dict() for k, v in sorted(self.application_states.items())
@@ -119,13 +127,13 @@ class EffectiveState:
 
 @dataclass(frozen=True)
 class ResolvedPractice:
-    """An effective practice matched to a context with full provenance."""
+    """Deeply immutable effective practice matched to a context with full provenance."""
 
     record_id: str
     practice_id: str
     version: int
     statement: str
-    scope: dict[str, Any]
+    scope: Mapping[str, Any]
     owner: str
     evidence_ids: tuple[str, ...]
     authority_class: AuthorityClass
@@ -139,7 +147,7 @@ class ResolvedPractice:
             "practice_id": self.practice_id,
             "version": self.version,
             "statement": self.statement,
-            "scope": self.scope,
+            "scope": unfreeze_value(self.scope),
             "owner": self.owner,
             "evidence_ids": list(self.evidence_ids),
             "authority_class": self.authority_class.value,
@@ -151,15 +159,15 @@ class ResolvedPractice:
 
 @dataclass(frozen=True)
 class ResolvedApplication:
-    """An effective application matched to a context with full provenance."""
+    """Deeply immutable effective application matched to a context with full provenance."""
 
     record_id: str
     application_id: str
     application_version: int
     practice_version_id: str
     route: str
-    applicability: dict[str, Any]
-    detection: dict[str, Any] | None
+    applicability: Mapping[str, Any]
+    detection: Mapping[str, Any] | None
     authority_class: AuthorityClass
     verified_repository_approval: bool
     deciding_record_ids: tuple[str, ...]
@@ -172,8 +180,8 @@ class ResolvedApplication:
             "application_version": self.application_version,
             "practice_version_id": self.practice_version_id,
             "route": self.route,
-            "applicability": self.applicability,
-            "detection": self.detection,
+            "applicability": unfreeze_value(self.applicability),
+            "detection": unfreeze_value(self.detection) if self.detection is not None else None,
             "authority_class": self.authority_class.value,
             "verified_repository_approval": self.verified_repository_approval,
             "deciding_record_ids": list(self.deciding_record_ids),
@@ -183,33 +191,33 @@ class ResolvedApplication:
 
 @dataclass(frozen=True)
 class ResolutionResult:
-    """Explicit result of resolve(context, as_of)."""
+    """Deeply immutable explicit result of resolve(context, as_of)."""
 
     state: ResolutionState
-    context: dict[str, Any]
+    context: Mapping[str, Any]
     as_of: str
     commit_ref: str | None
     policy_version: str
     computation_version: str
-    practices: list[ResolvedPractice] = field(default_factory=list)
-    applications: list[ResolvedApplication] = field(default_factory=list)
-    suspended_records: list[str] = field(default_factory=list)
-    conflicts: list[AdjudicationState] = field(default_factory=list)
-    reasons: list[str] = field(default_factory=list)
+    practices: tuple[ResolvedPractice, ...] = field(default_factory=tuple)
+    applications: tuple[ResolvedApplication, ...] = field(default_factory=tuple)
+    suspended_records: tuple[str, ...] = field(default_factory=tuple)
+    conflicts: tuple[AdjudicationState, ...] = field(default_factory=tuple)
+    reasons: tuple[str, ...] = field(default_factory=tuple)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "state": self.state.value,
-            "context": self.context,
+            "context": unfreeze_value(self.context),
             "as_of": self.as_of,
             "commit_ref": self.commit_ref,
             "policy_version": self.policy_version,
             "computation_version": self.computation_version,
             "practices": [p.to_dict() for p in self.practices],
             "applications": [a.to_dict() for a in self.applications],
-            "suspended_records": self.suspended_records,
+            "suspended_records": list(self.suspended_records),
             "conflicts": [c.to_dict() for c in self.conflicts],
-            "reasons": self.reasons,
+            "reasons": list(self.reasons),
         }
 
 
@@ -230,7 +238,6 @@ def _apply_lifecycle_decisions(
             reason="No qualifying effective governance decisions.",
         )
 
-    # Sort by (effective_at, ledger_seq if present else infinity, record_id)
     ordered = sorted(
         decisions,
         key=lambda item: (
@@ -272,7 +279,6 @@ def _apply_lifecycle_decisions(
         action = str(dec["body"]["action"])
         dec_id = str(dec["record_id"])
 
-        # Retired is terminal; subsequent decisions cannot resurrect a retired record.
         if lifecycle == "retired":
             continue
 
@@ -289,7 +295,6 @@ def _apply_lifecycle_decisions(
         elif action == GovernanceAction.RESTORE:
             if lifecycle == "suspended":
                 lifecycle = "approved"
-                # Restoring preserves verified status only if restore itself is verified
                 if ver.authority_class != AuthorityClass.VERIFIED_REPOSITORY_APPROVAL:
                     auth_class = ver.authority_class
                     verified_repo = False
@@ -316,20 +321,20 @@ def project_effective_state(
     policy: AuthorityPolicy | None = None,
     verifier: AuthorityVerifier | None = None,
     commit_ref: str | None = None,
-    ledger_order: dict[str, int] | None = None,
+    ledger_order: Mapping[str, int] | None = None,
 ) -> EffectiveState:
     """Compute EffectiveView(c, t, p) purely and deterministically from a record set."""
     eval_as_of = as_of or utc_now_iso()
     eval_dt = parse_rfc3339(eval_as_of)
     auth_policy = policy or AuthorityPolicy()
     auth_verifier = verifier or DefaultAuthorityVerifier()
-    seq_map = ledger_order or {}
+    seq_map = dict(ledger_order) if ledger_order else {}
 
     report = validate_records(records)
     by_id: dict[str, RecordDict] = {}
     indeterminate_reasons: list[str] = []
 
-    # Fatal structural/version/integrity errors make projection indeterminate (fail-safe).
+    # Fatal structural/version/integrity errors make projection indeterminate (fail-closed).
     fatal_codes = {
         "INVALID_RECORD_TYPE",
         "MISSING_SCHEMA_VERSION",
@@ -338,8 +343,10 @@ def project_effective_state(
         "DUPLICATE_RECORD_ID",
         "DANGLING_REFERENCE",
         "INVALID_VERSION_CHAIN",
+        "INVALID_APPLICATION_VERSION_CHAIN",
         "DUPLICATE_PRACTICE_VERSION",
         "DUPLICATE_APPLICATION_VERSION",
+        "CANONICALIZATION_ERROR",
     }
     for err in report.errors:
         if err.code in fatal_codes:
@@ -358,16 +365,16 @@ def project_effective_state(
             policy=auth_policy,
             computation_version=COMPUTATION_VERSION,
             indeterminate=True,
-            indeterminate_reasons=indeterminate_reasons,
+            indeterminate_reasons=tuple(indeterminate_reasons),
             records_by_id=by_id,
             practice_states={},
             application_states={},
             conflict_states={},
-            verification_log=[],
+            verification_log=(),
             validation_report=report,
         )
 
-    # Verify all governance decisions whose effective_at <= as_of
+    # Verify all governance decisions whose effective_at <= as_of (ignoring backdated decisions)
     verification_log: list[AuthorityVerificationResult] = []
     decisions_by_target: dict[
         str, list[tuple[datetime, int | None, RecordDict, AuthorityVerificationResult]]
@@ -376,7 +383,6 @@ def project_effective_state(
     governance_records = [
         r for r in by_id.values() if r.get("kind") == RecordKind.GOVERNANCE_DECISION
     ]
-    # Deterministic iteration order independent of input list order
     governance_records.sort(key=lambda r: str(r["record_id"]))
 
     for dec in governance_records:
@@ -386,6 +392,18 @@ def project_effective_state(
             continue
         target_id = str(body["target_record_id"])
         target = by_id.get(target_id)
+        # Fail closed on backdated governance decisions
+        if target is not None and eff_dt < parse_rfc3339(str(target["created_at"])):
+            verification_log.append(
+                AuthorityVerificationResult(
+                    decision_record_id=str(dec["record_id"]),
+                    valid_proof=False,
+                    authority_class=AuthorityClass.INVALID_AUTHORITY,
+                    effective_for_policy=False,
+                    reason="Governance decision effective_at predates target record created_at.",
+                )
+            )
+            continue
         ver = auth_verifier.verify(dec, target, auth_policy)
         verification_log.append(ver)
         if not ver.effective_for_policy:
@@ -426,7 +444,6 @@ def project_effective_state(
             )
             continue
 
-        # Enforce scope containment invariant even at replay time
         scope_ok, scope_reason = is_scope_subset(app_body["applicability"], pv["body"]["scope"])
         if not scope_ok:
             application_states[rec_id] = TargetState(
@@ -436,7 +453,7 @@ def project_effective_state(
                 authority_class=AuthorityClass.INVALID_AUTHORITY,
                 verified_repository_approval=False,
                 deciding_record_ids=(),
-                reason=f"Application blocked by scope overreach: {scope_reason}",
+                reason=f"Application blocked by scope overreach or ambiguity: {scope_reason}",
             )
             continue
 
@@ -446,8 +463,6 @@ def project_effective_state(
             decisions_by_target.get(rec_id, []),
         )
 
-        # Practice retirement/suspension overrides application activation;
-        # suspending an application does NOT affect the practice.
         if pv_state.lifecycle == "retired":
             application_states[rec_id] = TargetState(
                 record_id=rec_id,
@@ -479,7 +494,6 @@ def project_effective_state(
                 reason=f"Inactive because governing practice_version {pv_id!r} is {pv_state.lifecycle!r}.",
             )
         else:
-            # Both practice and application are approved: effective authority is the weaker of the two
             both_verified = (
                 pv_state.verified_repository_approval
                 and raw_app_state.verified_repository_approval
@@ -499,7 +513,7 @@ def project_effective_state(
                 reason=raw_app_state.reason,
             )
 
-    # Project Conflict adjudication states
+    # Project Conflict adjudication states (fail closed on simultaneous conflicting adjudications)
     conflict_states: dict[str, AdjudicationState] = {}
     for rec_id, rec in sorted(by_id.items()):
         if rec["kind"] != RecordKind.CONFLICT:
@@ -518,16 +532,40 @@ def project_effective_state(
                 relation=str(cbody["relation"]),
                 adjudicated=False,
             )
-        else:
-            adj_decisions.sort(
-                key=lambda item: (
-                    item[0],
-                    item[1] if item[1] is not None else 10**12,
-                    str(item[2]["record_id"]),
-                )
+            continue
+
+        adj_decisions.sort(
+            key=lambda item: (
+                item[0],
+                item[1] if item[1] is not None else 10**12,
+                str(item[2]["record_id"]),
             )
-            _, _, latest_dec, latest_ver = adj_decisions[-1]
+        )
+        # Check for ambiguous simultaneous conflicting dispositions
+        latest_t, latest_seq, latest_dec, latest_ver = adj_decisions[-1]
+        ambiguous_adj = False
+        for t_prev, seq_prev, dec_prev, _ in adj_decisions[:-1]:
+            if (
+                t_prev == latest_t
+                and (seq_prev is None or latest_seq is None or seq_prev == latest_seq)
+                and dec_prev["body"].get("resolution", {}).get("disposition")
+                != latest_dec["body"].get("resolution", {}).get("disposition")
+            ):
+                ambiguous_adj = True
+                break
+
+        if ambiguous_adj:
+            conflict_states[rec_id] = AdjudicationState(
+                conflict_record_id=rec_id,
+                left_record_id=str(cbody["left_record_id"]),
+                right_record_id=str(cbody["right_record_id"]),
+                relation=str(cbody["relation"]),
+                adjudicated=False,
+                ambiguous_adjudication=True,
+            )
+        else:
             res = latest_dec["body"].get("resolution", {})
+            exc_scope = res.get("exception_scope")
             conflict_states[rec_id] = AdjudicationState(
                 conflict_record_id=rec_id,
                 left_record_id=str(cbody["left_record_id"]),
@@ -536,7 +574,7 @@ def project_effective_state(
                 adjudicated=True,
                 disposition=res.get("disposition"),
                 explanation=res.get("explanation"),
-                exception_scope=res.get("exception_scope"),
+                exception_scope=freeze_value(exc_scope) if isinstance(exc_scope, Mapping) else None,
                 excepted_record_id=res.get("excepted_record_id"),
                 decision_record_id=str(latest_dec["record_id"]),
                 authority_class=latest_ver.authority_class,
@@ -548,41 +586,48 @@ def project_effective_state(
         policy=auth_policy,
         computation_version=COMPUTATION_VERSION,
         indeterminate=False,
-        indeterminate_reasons=[],
+        indeterminate_reasons=(),
         records_by_id=by_id,
         practice_states=practice_states,
         application_states=application_states,
         conflict_states=conflict_states,
-        verification_log=verification_log,
+        verification_log=tuple(verification_log),
         validation_report=report,
     )
 
 
-def resolve_context(effective_state: EffectiveState, context: dict[str, Any]) -> ResolutionResult:
+def resolve_context(
+    effective_state: EffectiveState,
+    context: Mapping[str, Any],
+) -> ResolutionResult:
     """Resolve effective practices and applications for a specific context.
 
-    Returns explicit state: none, active, ambiguous, suspended, or indeterminate.
+    Returns deeply immutable ResolutionResult with explicit state:
+    none, active, ambiguous, suspended, or indeterminate.
+    Fails closed whenever scope applicability or governance ordering is ambiguous.
     """
+    frozen_ctx: Mapping[str, Any] = freeze_value(context) if isinstance(context, Mapping) else freeze_value({})
+
     if effective_state.indeterminate:
         return ResolutionResult(
             state=ResolutionState.INDETERMINATE,
-            context=context,
+            context=frozen_ctx,
             as_of=effective_state.as_of,
             commit_ref=effective_state.commit_ref,
             policy_version=effective_state.policy.policy_version,
             computation_version=effective_state.computation_version,
-            reasons=list(effective_state.indeterminate_reasons),
+            reasons=effective_state.indeterminate_reasons,
         )
 
-    if not isinstance(context, dict) or not context.get("repository"):
+    if not isinstance(context, Mapping) or not isinstance(context.get("repository"), str) or not str(context.get("repository")).strip():
         return ResolutionResult(
             state=ResolutionState.INDETERMINATE,
-            context=context if isinstance(context, dict) else {},
+            context=frozen_ctx,
             as_of=effective_state.as_of,
             commit_ref=effective_state.commit_ref,
             policy_version=effective_state.policy.policy_version,
             computation_version=effective_state.computation_version,
-            reasons=["Resolution context must specify 'repository'."],
+            reasons=("Resolution context must specify a non-empty string 'repository'.",),
         )
 
     matched_active_ids: list[str] = []
@@ -591,7 +636,14 @@ def resolve_context(effective_state: EffectiveState, context: dict[str, Any]) ->
 
     for pv_id, st in sorted(effective_state.practice_states.items()):
         pv = effective_state.records_by_id[pv_id]
-        if not scope_matches_context(pv["body"]["scope"], context):
+        app_status, app_reason = evaluate_scope_applicability(pv["body"]["scope"], context)
+        if app_status == "ambiguous":
+            if st.lifecycle in ("approved", "ambiguous"):
+                ambiguous_reasons.append(
+                    f"Ambiguous applicability for practice {pv_id!r}: {app_reason}"
+                )
+            continue
+        if app_status != "match":
             continue
         if st.lifecycle == "ambiguous":
             ambiguous_reasons.append(f"Practice {pv_id!r} has ambiguous governance state: {st.reason}")
@@ -610,7 +662,12 @@ def resolve_context(effective_state: EffectiveState, context: dict[str, Any]) ->
     for c_state in effective_state.conflict_states.values():
         if c_state.left_record_id in active_set and c_state.right_record_id in active_set:
             relevant_conflicts.append(c_state)
-            if c_state.adjudicated:
+            if c_state.ambiguous_adjudication:
+                unresolved_conflicts.append(c_state)
+                ambiguous_reasons.append(
+                    f"Conflict {c_state.conflict_record_id!r} has ambiguous simultaneous adjudications."
+                )
+            elif c_state.adjudicated:
                 disp = c_state.disposition
                 if disp == AdjudicationDisposition.PREFER_LEFT:
                     suppressed_by_adjudication.add(c_state.right_record_id)
@@ -620,14 +677,22 @@ def resolve_context(effective_state: EffectiveState, context: dict[str, Any]) ->
                     suppressed_by_adjudication.add(c_state.left_record_id)
                     suppressed_by_adjudication.add(c_state.right_record_id)
                     suspended_ids.extend([c_state.left_record_id, c_state.right_record_id])
-                elif (
-                    disp == AdjudicationDisposition.SCOPED_EXCEPTION
-                    and c_state.exception_scope
-                    and scope_matches_context(c_state.exception_scope, context)
-                ):
-                    target_exc = c_state.excepted_record_id or c_state.left_record_id
-                    suppressed_by_adjudication.add(target_exc)
-                # MAINTAIN_BOTH keeps both active
+                elif disp == AdjudicationDisposition.SCOPED_EXCEPTION:
+                    if not c_state.exception_scope or not c_state.excepted_record_id:
+                        ambiguous_reasons.append(
+                            f"Scoped exception adjudication {c_state.decision_record_id!r} "
+                            "missing exception_scope or excepted_record_id."
+                        )
+                    else:
+                        exc_status, exc_reason = evaluate_scope_applicability(
+                            c_state.exception_scope, context
+                        )
+                        if exc_status == "ambiguous":
+                            ambiguous_reasons.append(
+                                f"Ambiguous scoped-exception applicability on {c_state.conflict_record_id!r}: {exc_reason}"
+                            )
+                        elif exc_status == "match":
+                            suppressed_by_adjudication.add(c_state.excepted_record_id)
             elif c_state.relation == ConflictRelation.CONTRADICTS:
                 unresolved_conflicts.append(c_state)
                 ambiguous_reasons.append(
@@ -639,7 +704,7 @@ def resolve_context(effective_state: EffectiveState, context: dict[str, Any]) ->
         pid for pid in matched_active_ids if pid not in suppressed_by_adjudication
     ]
 
-    # Check if two distinct versions of the same practice_id are simultaneously active without adjudication
+    # Check if two distinct versions of the same practice_id are simultaneously active
     versions_by_practice_id: dict[str, list[str]] = {}
     for pid in effective_practice_ids:
         prac_id = str(effective_state.records_by_id[pid]["body"]["practice_id"])
@@ -661,7 +726,7 @@ def resolve_context(effective_state: EffectiveState, context: dict[str, Any]) ->
                 practice_id=str(body["practice_id"]),
                 version=int(body["version"]),
                 statement=str(body["statement"]),
-                scope=body["scope"],
+                scope=freeze_value(body["scope"]),
                 owner=str(body["owner"]),
                 evidence_ids=tuple(str(e) for e in body.get("evidence_ids", [])),
                 authority_class=st.authority_class,
@@ -684,7 +749,14 @@ def resolve_context(effective_state: EffectiveState, context: dict[str, Any]) ->
             ):
                 suspended_ids.append(app_id)
             continue
-        if not scope_matches_context(app_body["applicability"], context):
+        app_status, app_reason = evaluate_scope_applicability(app_body["applicability"], context)
+        if app_status == "ambiguous":
+            if app_st.lifecycle in ("approved", "ambiguous"):
+                ambiguous_reasons.append(
+                    f"Ambiguous applicability for application {app_id!r}: {app_reason}"
+                )
+            continue
+        if app_status != "match":
             continue
         if app_st.lifecycle == "suspended":
             suspended_ids.append(app_id)
@@ -694,6 +766,7 @@ def resolve_context(effective_state: EffectiveState, context: dict[str, Any]) ->
             continue
         if app_st.lifecycle != "approved":
             continue
+        det = app_body.get("detection")
         resolved_apps.append(
             ResolvedApplication(
                 record_id=app_id,
@@ -701,8 +774,8 @@ def resolve_context(effective_state: EffectiveState, context: dict[str, Any]) ->
                 application_version=int(app_body["application_version"]),
                 practice_version_id=str(app_body["practice_version_id"]),
                 route=str(app_body["route"]),
-                applicability=app_body["applicability"],
-                detection=app_body.get("detection"),
+                applicability=freeze_value(app_body["applicability"]),
+                detection=freeze_value(det) if isinstance(det, Mapping) else None,
                 authority_class=app_st.authority_class,
                 verified_repository_approval=app_st.verified_repository_approval,
                 deciding_record_ids=app_st.deciding_record_ids,
@@ -713,55 +786,55 @@ def resolve_context(effective_state: EffectiveState, context: dict[str, Any]) ->
     if ambiguous_reasons:
         return ResolutionResult(
             state=ResolutionState.AMBIGUOUS,
-            context=context,
+            context=frozen_ctx,
             as_of=effective_state.as_of,
             commit_ref=effective_state.commit_ref,
             policy_version=effective_state.policy.policy_version,
             computation_version=effective_state.computation_version,
-            practices=resolved_practices,
-            applications=resolved_apps,
-            suspended_records=sorted(set(suspended_ids)),
-            conflicts=unresolved_conflicts or relevant_conflicts,
-            reasons=ambiguous_reasons,
+            practices=tuple(resolved_practices),
+            applications=tuple(resolved_apps),
+            suspended_records=tuple(sorted(set(suspended_ids))),
+            conflicts=tuple(unresolved_conflicts or relevant_conflicts),
+            reasons=tuple(ambiguous_reasons),
         )
 
     if resolved_practices:
         return ResolutionResult(
             state=ResolutionState.ACTIVE,
-            context=context,
+            context=frozen_ctx,
             as_of=effective_state.as_of,
             commit_ref=effective_state.commit_ref,
             policy_version=effective_state.policy.policy_version,
             computation_version=effective_state.computation_version,
-            practices=resolved_practices,
-            applications=resolved_apps,
-            suspended_records=sorted(set(suspended_ids)),
-            conflicts=relevant_conflicts,
-            reasons=[
+            practices=tuple(resolved_practices),
+            applications=tuple(resolved_apps),
+            suspended_records=tuple(sorted(set(suspended_ids))),
+            conflicts=tuple(relevant_conflicts),
+            reasons=(
                 f"Resolved {len(resolved_practices)} active practice(s) and "
-                f"{len(resolved_apps)} active application(s)."
-            ],
+                f"{len(resolved_apps)} active application(s).",
+            ),
         )
 
     if suspended_ids:
         return ResolutionResult(
             state=ResolutionState.SUSPENDED,
-            context=context,
+            context=frozen_ctx,
             as_of=effective_state.as_of,
             commit_ref=effective_state.commit_ref,
             policy_version=effective_state.policy.policy_version,
             computation_version=effective_state.computation_version,
-            suspended_records=sorted(set(suspended_ids)),
-            conflicts=relevant_conflicts,
-            reasons=[f"Matching record(s) currently suspended: {sorted(set(suspended_ids))}."],
+            suspended_records=tuple(sorted(set(suspended_ids))),
+            conflicts=tuple(relevant_conflicts),
+            reasons=(f"Matching record(s) currently suspended: {sorted(set(suspended_ids))}.",),
         )
 
     return ResolutionResult(
         state=ResolutionState.NONE,
-        context=context,
+        context=frozen_ctx,
         as_of=effective_state.as_of,
         commit_ref=effective_state.commit_ref,
         policy_version=effective_state.policy.policy_version,
         computation_version=effective_state.computation_version,
-        reasons=["No approved practices apply to the given context."],
+        reasons=("No approved practices apply to the given context.",),
     )

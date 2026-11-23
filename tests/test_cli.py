@@ -159,3 +159,94 @@ def test_cli_invalid_arguments_return_exit_invalid(tmp_path: Path, capsys) -> No
     assert rc == EXIT_INVALID
     err = json.loads(capsys.readouterr().out)
     assert "error" in err
+
+
+def test_real_file_source_linked_candidate_through_api_and_cli_with_per_line_provenance(
+    tmp_path: Path, capsys
+) -> None:
+    """Demonstrate capturing a source-linked inert candidate from a real file via both API and CLI,
+    recording per-line provenance, heuristic vs explicit-capture distinction, and disk drift detection.
+    """
+    from onemind import propose_from_source, query
+    from onemind.storage.git_store import GitRecordStore
+
+    repo = _init_temp_repo(tmp_path)
+
+    # 1. Scan reports per-line provenance and explicit capture_mode legend
+    assert main(["scan", str(repo), "--json"]) == EXIT_OK
+    scan_out = json.loads(capsys.readouterr().out)
+    assert "heuristic-scan" in scan_out["capture_mode_legend"]
+    assert "explicit-capture" in scan_out["capture_mode_legend"]
+    adr_stmts = [
+        s for s in scan_out["candidate_statements"] if s["source_path"] == "docs/adr/0001-logging.md"
+    ]
+    assert len(adr_stmts) == 1
+    assert adr_stmts[0]["line_number"] == 5
+    assert adr_stmts[0]["source_uri"] == "repo://docs/adr/0001-logging.md#L5"
+    assert adr_stmts[0]["capture_mode"] == "heuristic-scan"
+    assert adr_stmts[0]["matched_signal"] == "normative-keyword:MUST NOT"
+
+    # 2. Capture source-linked candidate from the REAL file via Python library API
+    store = GitRecordStore(repo)
+    api_prop = propose_from_source(
+        store,
+        repo,
+        statement="Services must never serialize bearer tokens into structured logs.",
+        evidence_specs=["docs/adr/0001-logging.md:5"],
+        scope_repository="sample_repo",
+        scope_paths=["services/**"],
+        record_id="cand-api-logging-001",
+        write=True,
+    )
+    assert api_prop.valid is True
+    assert api_prop.written is True
+    assert api_prop.candidate["body"]["generator"]["capture_mode"] == "explicit-capture"
+    ev_ext = api_prop.evidence[0]["extensions"]["source_provenance"]
+    assert ev_ext["capture_mode"] == "explicit-capture"
+    assert ev_ext["lines"][0]["line_number"] == 5
+
+    # 3. Capture a second candidate from the same real file via CLI (`onemind propose --write`)
+    assert (
+        main(
+            [
+                "propose",
+                "--repo",
+                str(repo),
+                "--statement",
+                "Always redact credentials before emitting logs.",
+                "--evidence",
+                "AGENTS.md:5",
+                "--scope-repo",
+                "sample_repo",
+                "--record-id",
+                "cand-cli-redact-001",
+                "--write",
+                "--json",
+            ]
+        )
+        == EXIT_OK
+    )
+    cli_prop = json.loads(capsys.readouterr().out)
+    assert cli_prop["written"] is True
+    assert cli_prop["capture_mode"] == "explicit-capture"
+
+    # Both candidates remain inert when queried through library API
+    q = query(store, {"kinds": ["practice_candidate"]})
+    assert {r.record.record_id for r in q.records} == {"cand-api-logging-001", "cand-cli-redact-001"}
+    assert all(r.lifecycle == "inert" for r in q.records)
+
+    # 4. Inspect candidate reports per-line provenance and live disk verification = matches-disk
+    assert main(["inspect", "cand-api-logging-001", "--repo", str(repo), "--json"]) == EXIT_OK
+    insp_ok = json.loads(capsys.readouterr().out)
+    assert insp_ok["capture_mode"] == "explicit-capture"
+    assert insp_ok["evidence"][0]["disk_verification"]["status"] == "matches-disk"
+
+    # 5. Modify source file on disk -> inspect detects source-drifted cleanly!
+    adr_path = repo / "docs" / "adr" / "0001-logging.md"
+    adr_path.write_text(
+        adr_path.read_text(encoding="utf-8").replace("bearer tokens", "OAuth tokens"),
+        encoding="utf-8",
+    )
+    assert main(["inspect", "cand-api-logging-001", "--repo", str(repo), "--json"]) == EXIT_OK
+    insp_drift = json.loads(capsys.readouterr().out)
+    assert insp_drift["evidence"][0]["disk_verification"]["status"] == "source-drifted"

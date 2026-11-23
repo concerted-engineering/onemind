@@ -140,3 +140,74 @@ def test_rejects_unsafe_record_id_traversal() -> None:
     report = validate_records([bad])
     assert not report.valid
     assert any(i.code == "UNSAFE_RECORD_ID" for i in report.errors)
+
+
+def test_rejects_application_version_gap_and_invalid_previous_version_id() -> None:
+    records = _load_fixture_records()[:6]
+    # Add application v3 without v2 -> INVALID_APPLICATION_VERSION_CHAIN
+    app_v3 = copy.deepcopy(records[4])
+    app_v3["record_id"] = "app-v3"
+    app_v3["body"]["application_version"] = 3
+    report = validate_records([*records, app_v3])
+    assert not report.valid
+    assert any(i.code == "INVALID_APPLICATION_VERSION_CHAIN" for i in report.errors)
+
+
+def test_rejects_backdated_governance_and_incomplete_conflict_and_ambiguous_scope() -> None:
+    records = _load_fixture_records()
+    # Backdated governance decision (effective_at < target.created_at)
+    backdated = copy.deepcopy(records)
+    backdated[3]["body"]["effective_at"] = "2026-11-19T00:00:00Z"
+    r1 = validate_records(backdated)
+    assert not r1.valid
+    assert any(i.code == "BACKDATED_GOVERNANCE_DECISION" for i in r1.errors)
+
+    # Conflict missing detector name/version
+    bad_conf = copy.deepcopy(records)
+    bad_conf[7]["body"]["detector"] = {}
+    r2 = validate_records(bad_conf)
+    assert not r2.valid
+    assert any(i.code == "INCOMPLETE_CONFLICT_DETECTOR" for i in r2.errors)
+
+    # Ambiguous scope with unknown constraint key -> AMBIGUOUS_SCOPE
+    amb_scope = copy.deepcopy(records[:4])
+    amb_scope[2]["body"]["scope"]["branch_pattern"] = "release/*"
+    amb_scope[3]["body"]["target_sha256"] = canonical_sha256(amb_scope[2])
+    r3 = validate_records(amb_scope)
+    assert not r3.valid
+    assert any(i.code == "AMBIGUOUS_SCOPE" for i in r3.errors)
+
+
+def test_rejects_outcome_provenance_mismatches_and_assignment_ordering() -> None:
+    records = _load_fixture_records()[:7]
+    # Wrong checker_version and wrong repo_id and predating application
+    bad_out = copy.deepcopy(records)
+    bad_out[6]["body"]["checker_version"] = "9.9.9"
+    bad_out[6]["body"]["repo_id"] = "other/repo"
+    bad_out[6]["body"]["observed_at"] = "2026-11-19T00:00:00Z"
+    r1 = validate_records(bad_out)
+    assert not r1.valid
+    codes = {i.code for i in r1.errors}
+    assert "OUTCOME_CHECKER_VERSION_MISMATCH" in codes
+    assert "OUTCOME_REPOSITORY_MISMATCH" in codes
+    assert "OUTCOME_PREDATES_APPLICATION" in codes
+
+    # Experiment assignment recorded AFTER alert -> ASSIGNMENT_AFTER_INTERVENTION
+    exp_recs = copy.deepcopy(records[:6])
+    assign_late = copy.deepcopy(records[6])
+    assign_late["record_id"] = "ev-assign-late"
+    assign_late["body"]["event_type"] = "assignment"
+    assign_late["body"]["experiment_id"] = "exp-order"
+    assign_late["body"]["observed_at"] = "2026-11-20T05:00:00Z"
+    assign_late["body"]["dedup_key"] = "exp-order:assign"
+    assign_late["body"]["details"] = {"arm": "treatment"}
+
+    alert_early = copy.deepcopy(records[6])
+    alert_early["record_id"] = "ev-alert-early"
+    alert_early["body"]["event_type"] = "alert"
+    alert_early["body"]["experiment_id"] = "exp-order"
+    alert_early["body"]["observed_at"] = "2026-11-20T04:00:00Z"
+    alert_early["body"]["dedup_key"] = "exp-order:alert"
+    r2 = validate_records([*exp_recs, assign_late, alert_early])
+    assert not r2.valid
+    assert any(i.code == "ASSIGNMENT_AFTER_INTERVENTION" for i in r2.errors)

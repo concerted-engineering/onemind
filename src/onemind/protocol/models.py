@@ -1,13 +1,18 @@
-"""Core protocol constants, enums, and record construction helpers (0.1-draft experimental)."""
+"""Core protocol constants, enums, immutable record helpers, and envelope builders (0.1-draft)."""
 
 from __future__ import annotations
 
 import re
 import secrets
 import time
+from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Any
+
+from onemind.protocol.canonical import canonical_sha256
 
 SCHEMA_VERSION = "0.1-draft"
 PROTOCOL_STATUS = "experimental"
@@ -86,6 +91,60 @@ class ResolutionState(StrEnum):
     INDETERMINATE = "indeterminate"
 
 
+def freeze_value(value: Any) -> Any:
+    """Recursively freeze JSON-compatible dicts/lists into MappingProxyType/tuple."""
+    if isinstance(value, Mapping):
+        return MappingProxyType({str(k): freeze_value(v) for k, v in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(freeze_value(item) for item in value)
+    return value
+
+
+def unfreeze_value(value: Any) -> Any:
+    """Recursively convert frozen MappingProxyType/tuple structures back to plain JSON dict/list."""
+    if isinstance(value, Mapping):
+        return {str(k): unfreeze_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [unfreeze_value(item) for item in value]
+    return value
+
+
+@dataclass(frozen=True)
+class ImmutableRecord:
+    """Deeply immutable representation of a validated OneMind record envelope."""
+
+    schema_version: str
+    record_id: str
+    kind: str
+    created_at: str
+    actor: Mapping[str, Any]
+    body: Mapping[str, Any]
+    record_sha256: str
+    raw: Mapping[str, Any]
+
+    @classmethod
+    def from_mapping(cls, record: Mapping[str, Any]) -> ImmutableRecord:
+        plain = unfreeze_value(record)
+        if not isinstance(plain, dict):
+            raise TypeError("Record must be a JSON object mapping.")
+        frozen_raw: Mapping[str, Any] = freeze_value(plain)
+        return cls(
+            schema_version=str(plain["schema_version"]),
+            record_id=str(plain["record_id"]),
+            kind=str(plain["kind"]),
+            created_at=str(plain["created_at"]),
+            actor=frozen_raw["actor"],
+            body=frozen_raw["body"],
+            record_sha256=canonical_sha256(plain),
+            raw=frozen_raw,
+        )
+
+    def to_dict(self) -> RecordDict:
+        res = unfreeze_value(self.raw)
+        assert isinstance(res, dict)
+        return res
+
+
 def is_safe_record_id(record_id: str) -> bool:
     """Return True if record_id is safe for filesystem path mapping and free of traversal."""
     if not isinstance(record_id, str):
@@ -113,7 +172,6 @@ def parse_rfc3339(value: str) -> datetime:
     normalized = value
     if normalized.endswith(("Z", "z")):
         normalized = normalized[:-1] + "+00:00"
-    # Truncate sub-microsecond fractional digits if > 6 digits
     dot_idx = normalized.find(".")
     if dot_idx != -1:
         tz_idx = max(normalized.find("+", dot_idx), normalized.find("-", dot_idx))

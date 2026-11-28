@@ -137,14 +137,48 @@ class CheckResult:
         }
 
 
+@dataclass(frozen=True)
+class SourceRequest:
+    """Bounded query parameters for remote/API source adapters (e.g. GitHub review history)."""
+
+    repository: str
+    since: str | None = None
+    until: str | None = None
+    states: tuple[str, ...] = ("all",)
+    max_items: int = 100
+    max_pages: int = 20
+    extra: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "repository": self.repository,
+            "since": self.since,
+            "until": self.until,
+            "states": list(self.states),
+            "max_items": self.max_items,
+            "max_pages": self.max_pages,
+            "extra": self.extra,
+        }
+
+
 @runtime_checkable
 class SourceAdapter(Protocol):
-    """Ingests external or local artifacts as immutable, inert Evidence records."""
+    """Ingests local/file artifacts as immutable, inert Evidence records."""
 
     name: str
     version: str
 
     def ingest(self, source_path: Path, *, repository: str) -> IngestionResult: ...
+
+
+@runtime_checkable
+class RemoteSourceAdapter(Protocol):
+    """Ingests bounded remote/API observations without requiring fake local Path objects."""
+
+    name: str
+    version: str
+
+    def ingest_remote(self, request: SourceRequest) -> IngestionResult: ...
 
 
 @runtime_checkable

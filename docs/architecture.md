@@ -57,6 +57,8 @@ Implemented in `src/onemind/engine.py` (`OneMindEngine`):
 
 Lifecycle transitions per target are deterministic (`unapproved → approved ↔ suspended → retired`, where `retired` is terminal). Suspending an application does not suspend its governing practice; retiring a practice invalidates all applications referencing it.
 
-## 5. Adapter Composability
+## 5. Adapter Composability & M2A Remote Ingestion
 
-`src/onemind/adapters/interfaces.py` defines seven minimal `Protocol` interfaces (`SourceAdapter`, `Extractor`, `AuthorityVerifier`, `Store`, `ApplicationAdapter`, `OutcomeSink`, `Reporter`). Any external workflow can ingest evidence and propose inert candidates through `SourceAdapter` + `Extractor` without introducing framework dependencies or conferring governance authority. Canonical records remain independently readable and valid if any adapter is removed.
+`src/onemind/adapters/interfaces.py` defines minimal `Protocol` interfaces (`SourceAdapter`, `RemoteSourceAdapter`, `Extractor`, `AuthorityVerifier`, `Store`, `ApplicationAdapter`, `OutcomeSink`, `Reporter`). Local/file adapters (`LocalFilesSourceAdapter`, `MarkdownRetroAdapter`, `JsonObservationAdapter`) implement `SourceAdapter.ingest(source_path, repository=...)`, while bounded remote API ingestion (`GitHubReviewSourceAdapter` in `src/onemind/adapters/github/`) implements `RemoteSourceAdapter.ingest_remote(request: SourceRequest)` without forcing fake local paths.
+
+Run-level ingestion coverage for M2A is persisted as an append-only `IngestionRun` manifest under `.onemind/ingestions/<run_id>/manifest.json` (`0.1-draft-ingestion-run`), preserving the seven canonical `0.1-draft` record kinds without fabricating practice/application IDs in `OutcomeEvent`. Both `GitRecordStore.verify_ingestion_manifests()` and `verify_trusted_base()` validate persisted ingestion manifests against tampering and deletion. See [ADR-0002](decisions/0002-m2a-github-evidence-ingestion.md).

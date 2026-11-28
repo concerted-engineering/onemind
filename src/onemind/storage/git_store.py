@@ -101,6 +101,7 @@ class GitRecordStore(Store, OutcomeSink):
         self.store_dir = self.repo_path / store_rel_dir
         self.records_dir = self.store_dir / "records"
         self.batches_dir = self.store_dir / "batches"
+        self.ingestions_dir = self.store_dir / "ingestions"
         self.cache_dir = self.store_dir / "cache"
         self._lock_path = self.cache_dir / ".write.lock"
 
@@ -310,6 +311,10 @@ class GitRecordStore(Store, OutcomeSink):
         for bpath, code, msg in self.verify_batch_manifests():
             parse_errors.append((bpath, f"[{code}] {msg}"))
 
+        # Detect ingestion-run manifest corruption or orphan staging dirs
+        for ipath, code, msg in self.verify_ingestion_manifests():
+            parse_errors.append((ipath, f"[{code}] {msg}"))
+
         for path in self._iter_record_files(kind=None):
             try:
                 raw = json.loads(path.read_text(encoding="utf-8"))
@@ -358,7 +363,182 @@ class GitRecordStore(Store, OutcomeSink):
                         _ensure_within_root(self.repo_path, staging_dir)
                         shutil.rmtree(staging_dir)
                         cleaned.append(str(staging_dir.relative_to(self.repo_path)))
+            if self.ingestions_dir.is_dir():
+                for staging_dir in sorted(self.ingestions_dir.glob(".staging-*")):
+                    if staging_dir.is_dir():
+                        _ensure_within_root(self.repo_path, staging_dir)
+                        shutil.rmtree(staging_dir)
+                        cleaned.append(str(staging_dir.relative_to(self.repo_path)))
         return cleaned
+
+    def append_ingestion_run(self, manifest: dict[str, Any]) -> Path:
+        """Atomically persist an immutable IngestionRun manifest under `.onemind/ingestions/<run_id>/`."""
+        run_id = manifest.get("run_id")
+        if not isinstance(run_id, str) or not is_safe_record_id(run_id):
+            raise StoreError(f"Invalid or unsafe ingestion run_id: {run_id!r}")
+        if manifest.get("schema_version") != "0.1-draft-ingestion-run":
+            raise StoreError(
+                f"Unsupported ingestion run schema_version: {manifest.get('schema_version')!r}"
+            )
+
+        with self._writer_lock():
+            run_dir = self.ingestions_dir / run_id
+            if run_dir.exists():
+                raise DuplicateRecordError(f"Ingestion run directory already exists: {run_dir}")
+
+            self.ingestions_dir.mkdir(parents=True, exist_ok=True)
+            _ensure_within_root(self.repo_path, self.ingestions_dir)
+            staging_dir = self.ingestions_dir / f".staging-{run_id}-{secrets.token_hex(4)}"
+            staging_dir.mkdir(parents=False, exist_ok=False)
+            try:
+                manifest_path = staging_dir / "manifest.json"
+                payload = json.dumps(manifest, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+                with manifest_path.open("w", encoding="utf-8") as fh:
+                    fh.write(payload)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                _fsync_directory(staging_dir)
+                os.rename(str(staging_dir), str(run_dir))
+                _fsync_directory(self.ingestions_dir)
+            except Exception:
+                shutil.rmtree(staging_dir, ignore_errors=True)
+                raise
+            return run_dir / "manifest.json"
+
+    def list_ingestion_runs(self) -> list[dict[str, Any]]:
+        """Load all finalized IngestionRun manifests in deterministic run_id order."""
+        runs: list[dict[str, Any]] = []
+        if not self.ingestions_dir.is_dir():
+            return runs
+        for entry in sorted(self.ingestions_dir.iterdir()):
+            if not entry.is_dir() or entry.name.startswith(".staging-"):
+                continue
+            mpath = entry / "manifest.json"
+            if not mpath.is_file():
+                continue
+            _ensure_within_root(self.repo_path, mpath)
+            parsed = json.loads(mpath.read_text(encoding="utf-8"))
+            if isinstance(parsed, dict):
+                runs.append(parsed)
+        return runs
+
+    def verify_ingestion_manifests(self) -> list[tuple[Path, str, str]]:
+        """Verify integrity of persisted `.onemind/ingestions/<run_id>/manifest.json` files."""
+        findings: list[tuple[Path, str, str]] = []
+        if not self.ingestions_dir.is_dir():
+            return findings
+
+        for entry in sorted(self.ingestions_dir.iterdir()):
+            if entry.name.startswith(".staging-"):
+                findings.append(
+                    (
+                        entry,
+                        "ORPHAN_STAGING_ARTIFACT",
+                        f"Incomplete ingestion staging directory {entry.name!r}; run recover_staging() to clean up.",
+                    )
+                )
+                continue
+            if not entry.is_dir():
+                continue
+
+            mpath = entry / "manifest.json"
+            if not mpath.is_file():
+                findings.append(
+                    (
+                        mpath,
+                        "CORRUPT_INGESTION_MANIFEST",
+                        f"Ingestion directory {entry.name!r} is missing manifest.json.",
+                    )
+                )
+                continue
+
+            try:
+                _ensure_within_root(self.repo_path, mpath)
+                manifest = json.loads(mpath.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError, StoreError) as exc:
+                findings.append(
+                    (
+                        mpath,
+                        "CORRUPT_INGESTION_MANIFEST",
+                        f"Ingestion manifest {mpath} could not be parsed: {exc}",
+                    )
+                )
+                continue
+
+            if not isinstance(manifest, dict):
+                findings.append(
+                    (
+                        mpath,
+                        "CORRUPT_INGESTION_MANIFEST",
+                        f"Ingestion manifest {mpath} must be a JSON object.",
+                    )
+                )
+                continue
+
+            if manifest.get("schema_version") != "0.1-draft-ingestion-run":
+                findings.append(
+                    (
+                        mpath,
+                        "UNSUPPORTED_INGESTION_SCHEMA",
+                        f"Unsupported ingestion manifest schema_version {manifest.get('schema_version')!r}.",
+                    )
+                )
+                continue
+
+            if manifest.get("run_id") != entry.name:
+                findings.append(
+                    (
+                        mpath,
+                        "CORRUPT_INGESTION_MANIFEST",
+                        f"Ingestion directory {entry.name!r} does not match manifest run_id {manifest.get('run_id')!r}.",
+                    )
+                )
+
+            ev_digests = manifest.get("evidence_digests")
+            if not isinstance(ev_digests, list):
+                findings.append(
+                    (
+                        mpath,
+                        "CORRUPT_INGESTION_MANIFEST",
+                        f"Ingestion manifest {mpath} missing 'evidence_digests' list.",
+                    )
+                )
+                continue
+
+            for item in ev_digests:
+                if not isinstance(item, dict) or not item.get("record_id") or not item.get("record_sha256"):
+                    findings.append(
+                        (
+                            mpath,
+                            "CORRUPT_INGESTION_MANIFEST",
+                            f"Ingestion manifest {mpath} contains malformed evidence_digests entry.",
+                        )
+                    )
+                    continue
+                rid = str(item["record_id"])
+                rec = self.get_record(rid)
+                if rec is None:
+                    findings.append(
+                        (
+                            mpath,
+                            "INGESTION_EVIDENCE_MISSING",
+                            f"Ingestion manifest {entry.name!r} cites missing evidence record {rid!r}.",
+                        )
+                    )
+                    continue
+                actual_sha = canonical_sha256(rec)
+                if actual_sha != item["record_sha256"]:
+                    findings.append(
+                        (
+                            mpath,
+                            "INGESTION_EVIDENCE_DIGEST_MISMATCH",
+                            (
+                                f"Evidence {rid!r} canonical digest {actual_sha!r} does not match "
+                                f"ingestion manifest digest {item['record_sha256']!r}."
+                            ),
+                        )
+                    )
+        return findings
 
     def get_record(self, record_id: str) -> RecordDict | None:
         if not is_safe_record_id(record_id):

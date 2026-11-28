@@ -1,0 +1,128 @@
+{
+  "description": "Offline synthetic GitHub REST API fixture for M2A complete ingestion demo (2 paginated PRs with reviews, inline review comments, and conversation comments).",
+  "responses": {
+    "/repos/example/service-api/pulls?state=all&sort=updated&direction=desc&per_page=100": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "link": "<https://api.github.com/repos/example/service-api/pulls?state=all&sort=updated&direction=desc&per_page=100&page=2>; rel=\"next\""
+      },
+      "body": [
+        {
+          "number": 102,
+          "state": "closed",
+          "created_at": "2026-10-18T09:00:00Z",
+          "updated_at": "2026-10-20T14:30:00Z",
+          "merged_at": "2026-10-20T14:25:00Z",
+          "head": { "sha": "head102aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+          "base": { "sha": "base102bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }
+        }
+      ]
+    },
+    "/repos/example/service-api/pulls?state=all&sort=updated&direction=desc&per_page=100&page=2": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8"
+      },
+      "body": [
+        {
+          "number": 101,
+          "state": "closed",
+          "created_at": "2026-10-05T11:00:00Z",
+          "updated_at": "2026-10-07T16:15:00Z",
+          "merged_at": "2026-10-07T16:10:00Z",
+          "head": { "sha": "head101ccccccccccccccccccccccccccccccccc" },
+          "base": { "sha": "base101ddddddddddddddddddddddddddddddddd" }
+        },
+        {
+          "number": 95,
+          "state": "closed",
+          "created_at": "2026-09-10T08:00:00Z",
+          "updated_at": "2026-09-12T10:00:00Z",
+          "merged_at": "2026-09-12T09:55:00Z",
+          "head": { "sha": "head095eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" },
+          "base": { "sha": "base095fffffffffffffffffffffffffffffffff" }
+        }
+      ]
+    },
+    "/repos/example/service-api/pulls/101/reviews?per_page=100": {
+      "status": 200,
+      "body": [
+        {
+          "id": 5001,
+          "user": { "login": "reviewer-alice" },
+          "state": "CHANGES_REQUESTED",
+          "body": "Please preserve the `currency` response field on /v1/orders to avoid breaking external SDKs.",
+          "submitted_at": "2026-10-06T10:15:00Z",
+          "commit_id": "head101ccccccccccccccccccccccccccccccccc",
+          "html_url": "https://github.com/example/service-api/pull/101#pullrequestreview-5001"
+        }
+      ]
+    },
+    "/repos/example/service-api/pulls/101/comments?per_page=100": {
+      "status": 200,
+      "body": [
+        {
+          "id": 6001,
+          "user": { "login": "reviewer-alice" },
+          "body": "Removing `currency` here breaks v1 clients. Also contact api-owners@example.invalid before deprecating.",
+          "created_at": "2026-10-06T10:12:00Z",
+          "updated_at": "2026-10-06T10:12:00Z",
+          "commit_id": "head101ccccccccccccccccccccccccccccccccc",
+          "path": "api/schemas/orders_v1.json",
+          "line": 18,
+          "pull_request_review_id": 5001,
+          "html_url": "https://github.com/example/service-api/pull/101#discussion_r6001"
+        }
+      ]
+    },
+    "/repos/example/service-api/issues/101/comments?per_page=100": {
+      "status": 200,
+      "body": [
+        {
+          "id": 7001,
+          "user": { "login": "author-bob" },
+          "body": "Restored `currency` and added compatibility regression fixture.",
+          "created_at": "2026-10-07T09:00:00Z",
+          "updated_at": "2026-10-07T09:00:00Z",
+          "html_url": "https://github.com/example/service-api/pull/101#issuecomment-7001"
+        }
+      ]
+    },
+    "/repos/example/service-api/pulls/102/reviews?per_page=100": {
+      "status": 200,
+      "body": [
+        {
+          "id": 5002,
+          "user": { "login": "reviewer-carol" },
+          "state": "COMMENTED",
+          "body": "Explicit HTTP client timeouts are required in billing adapters.",
+          "submitted_at": "2026-10-19T12:00:00Z",
+          "commit_id": "head102aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "html_url": "https://github.com/example/service-api/pull/102#pullrequestreview-5002"
+        }
+      ]
+    },
+    "/repos/example/service-api/pulls/102/comments?per_page=100": {
+      "status": 200,
+      "body": [
+        {
+          "id": 6002,
+          "user": { "login": "reviewer-carol" },
+          "body": "Never embed credentials like ghp_1234567890abcdefghij1234567890abcd or api_key=supersecret1234 in client defaults.",
+          "created_at": "2026-10-19T11:58:00Z",
+          "updated_at": "2026-10-19T11:58:00Z",
+          "commit_id": "head102aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "path": "services/billing/http_client.py",
+          "line": 42,
+          "pull_request_review_id": 5002,
+          "html_url": "https://github.com/example/service-api/pull/102#discussion_r6002"
+        }
+      ]
+    },
+    "/repos/example/service-api/issues/102/comments?per_page=100": {
+      "status": 200,
+      "body": []
+    }
+  }
+}

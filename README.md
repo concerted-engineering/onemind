@@ -2,7 +2,7 @@
 
 > **Your team learns once. Every agent benefits.**
 
-**License:** Apache-2.0 · **Protocol:** `0.1-draft` (`experimental`) · **Scope:** M0 + M1 (local-first OSS core & CLI)
+**License:** Apache-2.0 · **Protocol:** `0.1-draft` (`experimental`) · **Scope:** M0 + M1 + M2A (local-first OSS core, CLI & opt-in read-only GitHub evidence ingestion)
 
 OneMind is the open-source engineering-intelligence substrate of **Concerted Engineering**. It enables engineering teams to accumulate source-linked **Evidence**, propose inert **PracticeCandidates**, govern versioned **PracticeVersions** and **Applications** through explicit **GovernanceDecisions** and **Conflicts**, and record append-only **OutcomeEvents**—independently of any specific AI model, coding agent, CI system, or hosted service.
 
@@ -122,6 +122,32 @@ draft = propose_from_source(
 print(draft.valid, draft.written)
 ```
 
+## Read-Only GitHub Review-History Ingestion (M2A — Opt-In)
+
+Ingest bounded GitHub PR review submissions, inline review comments, and conversation comments as strictly **inert `Evidence`** plus immutable run-level coverage manifests (`.onemind/ingestions/<run_id>/manifest.json`). Defaults to **dry-run** and **`metadata-only`** capture (raw review bodies and tokens are never printed or committed by default).
+
+```bash
+# Offline deterministic fixture demo (zero network, zero credentials)
+onemind ingest github \
+  --repository example/service-api \
+  --store . \
+  --since 2026-10-01 \
+  --until 2026-11-01 \
+  --fixture-file examples/github-ingest-fixture/github_complete.json \
+  --json
+
+# Opt-in live public-repo dry-run (bounded limits, unauthenticated or via --token-env GITHUB_TOKEN)
+onemind ingest github \
+  --repository OWNER/PUBLIC-REPO \
+  --store . \
+  --since 2026-10-01 \
+  --until 2026-11-01 \
+  --max-prs 25 \
+  --max-pages 5
+```
+
+See [`examples/github-ingest-fixture/README.md`](examples/github-ingest-fixture/README.md) and [`docs/decisions/0002-m2a-github-evidence-ingestion.md`](docs/decisions/0002-m2a-github-evidence-ingestion.md) for the full offline walkthrough, edit/re-ingestion behavior, and privacy controls.
+
 ## Generic Workflow Composability
 
 OneMind defines minimal interfaces in [`src/onemind/adapters/interfaces.py`](src/onemind/adapters/interfaces.py) (`SourceAdapter`, `Extractor`, `AuthorityVerifier`, `Store`, `ApplicationAdapter`, `OutcomeSink`, `Reporter`). Two unrelated synthetic fixtures under [`examples/workflow-fixtures/`](examples/workflow-fixtures/)—a Markdown engineering retrospective (`MarkdownRetroAdapter`) and a structured JSON observation log (`JsonObservationAdapter`)—demonstrate identical ingestion, provenance preservation, non-authority, unified querying/resolution, and independent removability without coupling OneMind to any external workflow engine.
@@ -133,8 +159,9 @@ OneMind defines minimal interfaces in [`src/onemind/adapters/interfaces.py`](src
 - [`spec/record.schema.json`](spec/record.schema.json) — JSON Schema 2020-12 structural schema
 - [`docs/architecture.md`](docs/architecture.md) — M0 + M1 architecture and replay model
 - [`docs/security.md`](docs/security.md) — Security invariants, threat boundaries, and current limitations
-- [`docs/decisions/0001-m0-m1-protocol-and-trust-boundaries.md`](docs/decisions/0001-m0-m1-protocol-and-trust-boundaries.md) — Implementation ADRs
-- [`docs/M2_BLOCKERS.md`](docs/M2_BLOCKERS.md) — Explicitly deferred M2 (Governed GitHub Pilot) prerequisites
+- [`docs/decisions/0001-m0-m1-protocol-and-trust-boundaries.md`](docs/decisions/0001-m0-m1-protocol-and-trust-boundaries.md) — M0 + M1 implementation ADR
+- [`docs/decisions/0002-m2a-github-evidence-ingestion.md`](docs/decisions/0002-m2a-github-evidence-ingestion.md) — M2A GitHub evidence ingestion & coverage manifest ADR
+- [`docs/M2_BLOCKERS.md`](docs/M2_BLOCKERS.md) — M2A completion status and remaining M2B+ prerequisites
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) · [`SECURITY.md`](SECURITY.md) · [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) · [`LICENSE`](LICENSE)
 
 ## Testing & Quality Checks

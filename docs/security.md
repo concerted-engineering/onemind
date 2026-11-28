@@ -33,7 +33,16 @@
    - `record_id` and `batch_id` values are restricted to safe characters without path separators or `..`.
    - `scan`, `inspect`, `propose`, and `preview` block path traversal (`..`) and symlink escapes outside the repository root.
    - `scan` enforces a per-file byte limit (`1 MiB` default) and gracefully skips binary or non-UTF-8 files.
-   - All M0 + M1 commands are 100% offline with zero network calls, zero external LLM calls, and zero telemetry. Read-only commands (`scan`, `inspect`, `preview`, `validate`, and `propose` without `--write`) never modify the working tree.
+   - All M0 + M1 commands (`scan`, `inspect`, `propose`, `preview`, `validate`) are 100% offline with zero network calls, zero external LLM calls, and zero telemetry. Read-only commands never modify the working tree.
+
+7. **M2A read-only GitHub ingestion security & privacy (`onemind ingest github`).**
+   - Opt-in network access only when explicitly invoked without `--fixture-file`; zero GitHub writes, zero LLM calls, zero telemetry.
+   - HTTP transport enforces a single configured HTTPS origin (default `https://api.github.com`), blocks cross-origin/scheme-downgrade redirects and malicious `Link` headers, detects pagination loops, validates JSON `Content-Type`, and caps response payload size (`5 MiB` default).
+   - Default `DataCapturePolicy` is `metadata-only` (raw review text never stored on disk). Opt-in `redacted-excerpt` applies deterministic secret/PII redaction and documents its heuristic limitations.
+   - Tokens are read only via `--token-env NAME` (never CLI args), never stored in records/manifests, and scrubbed from all diagnostics and exception messages.
+   - Console and `--json` outputs emit safe counts, IDs, and coverage only—never raw review bodies or tokens.
+   - Persisted `IngestionRun` manifests under `.onemind/ingestions/` are immutable and verified by `onemind validate --trusted-base`.
+   - Ingested GitHub reviews and comments are strictly inert `Evidence`; GitHub review states (`APPROVED`, `CHANGES_REQUESTED`) never confer OneMind governance authority.
 
 ## 2. Known Security Limitations in M0 + M1
 

@@ -166,7 +166,7 @@ def verify_trusted_base(
             reason=issue.message,
         )
 
-    # Enumerate all record and batch files present at trusted_base
+    # Enumerate all record, batch, and ingestion-run manifest files present at trusted_base
     ls_proc = _run_git(
         repo_root,
         [
@@ -178,6 +178,7 @@ def verify_trusted_base(
             "--",
             f"{store_rel_dir}/records",
             f"{store_rel_dir}/batches",
+            f"{store_rel_dir}/ingestions",
         ],
     )
     if ls_proc.returncode != 0:

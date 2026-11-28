@@ -1,16 +1,17 @@
-# M2 Blockers & Prerequisites (Explicitly Deferred from M0 + M1)
+# M2 Blockers & Prerequisites
 
-**Status:** M2 (Governed GitHub Pilot) is **not implemented** in M0 + M1. No empirical claims about engineering improvement may be made from the synthetic M1 demo or workflow fixtures.
+**Status:** **M2A** (read-only GitHub PR review-history evidence ingestion and run-level coverage accounting) is implemented and offline-tested. **M2B / M2C** (verified GitHub governance proofs, trusted preflight execution, randomized pilot assignment, and outcome measurement) remain **explicitly deferred**. No empirical claims about engineering improvement may be made from synthetic fixtures or historical observations.
 
-Before enabling live GitHub PR review mining, active preflight, or prospective experimentation in M2, every prerequisite below must be designed, security-reviewed, and backed by automated conformance tests.
+Before enabling verified governance promotion, active preflight, or prospective experimentation in M2B+, every remaining prerequisite below must be designed, security-reviewed, and backed by automated conformance tests.
 
-## 1. Real GitHub Evidence Ingestion and Coverage Accounting
+## 1. Real GitHub Evidence Ingestion and Coverage Accounting — **Resolved (M2A)**
 
-- Implement a read-only GitHub `SourceAdapter` supporting cursor pagination, rate-limit backoff, and explicit retry limits.
-- Record complete coverage accounting per ingestion run (`run-health` / `indeterminate` events) whenever pagination is truncated, API errors occur, or comments/reviews are deleted or inaccessible (`source_state: "source-unavailable"`).
-- Support explicit repository data-sharing opt-in and configurable excerpt redaction/omission policies before writing any evidence to Git.
+- Implemented read-only [`GitHubReviewSourceAdapter`](../src/onemind/adapters/github/adapter.py) (`onemind ingest github`) over an injectable origin-constrained stdlib HTTPS transport (`UrllibGitHubTransport` / `FixtureHttpTransport`), supporting RFC 8288 `Link` pagination, loop/truncation detection, bounded exponential retries with injectable clock/sleep, and deterministic edit/deduplication versioning.
+- Implemented immutable append-only `IngestionRun` coverage manifests (`.onemind/ingestions/<run_id>/manifest.json`, verified under `onemind validate --trusted-base`) per [ADR-0002](decisions/0002-m2a-github-evidence-ingestion.md), capturing complete vs. incomplete coverage, endpoint gaps, filtered items, and timestamps without fabricating practice/application IDs.
+- Implemented explicit `DataCapturePolicy` (`metadata-only` default; opt-in `redacted-excerpt` with deterministic secret/PII redaction and documented limitations).
+- *Remaining live operational note:* Live GitHub API ingestion requires explicit user opt-in and a read-only token via `--token-env` (or public unauthenticated access within GitHub rate limits); automated test suites remain 100% offline.
 
-## 2. Verified Reviewer Authority and Protected-Merge Checks
+## 2. Verified Reviewer Authority and Protected-Merge Checks (M2B — Open)
 
 - Replace local proof-structure checks with a live `AuthorityVerifier` anchored to GitHub's protected-branch rulesets, CODEOWNERS / qualifying reviewer lists, and exact review-commit-to-merge-commit binding.
 - Verify that the approved content's RFC 8785 canonical SHA-256 digest matches the exact commit reviewed by a qualifying human reviewer and merged through branch protection (rejecting post-approval pushes, self-approvals where disallowed, and bypassed merges).

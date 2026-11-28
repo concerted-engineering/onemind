@@ -11,12 +11,29 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 from onemind import __version__
+from onemind.adapters.github import (
+    DEFAULT_GITHUB_API_ORIGIN,
+    DEFAULT_MAX_EXCERPT_CHARS,
+    VALID_CAPTURE_MODES,
+    VALID_PR_STATES,
+    DataCapturePolicy,
+    FixtureHttpTransport,
+    GitHubRestClient,
+    GitHubReviewSourceAdapter,
+    GitHubTransportError,
+    HttpTransport,
+    UrllibGitHubTransport,
+    validate_repository_slug,
+    validate_trusted_origin,
+)
+from onemind.adapters.interfaces import SourceRequest
 from onemind.adapters.local_files import (
     CAPTURE_MODE_LEGEND,
     DEFAULT_MAX_FILE_BYTES,
@@ -901,6 +918,161 @@ def _cmd_validate(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Subcommand: ingest github
+# ---------------------------------------------------------------------------
+def _cmd_ingest_github(args: argparse.Namespace) -> int:
+    try:
+        validate_repository_slug(args.repository)
+        api_origin = validate_trusted_origin(args.api_origin)
+        if args.capture_policy not in VALID_CAPTURE_MODES:
+            raise ValueError(
+                f"Invalid --capture-policy {args.capture_policy!r}; expected one of {sorted(VALID_CAPTURE_MODES)}."
+            )
+        policy = DataCapturePolicy(
+            mode=args.capture_policy,
+            max_excerpt_chars=args.max_excerpt_chars,
+        )
+        if args.state not in VALID_PR_STATES:
+            raise ValueError(
+                f"Invalid --state {args.state!r}; expected one of {sorted(VALID_PR_STATES)}."
+            )
+        if args.max_prs < 1 or args.max_pages < 1:
+            raise ValueError("--max-prs and --max-pages must be >= 1.")
+    except (ValueError, GitHubTransportError) as exc:
+        _emit_error(str(exc), as_json=args.json, code="INGEST_INVALID_INPUT")
+        return EXIT_INVALID
+
+    token: str | None = None
+    token_env_name: str | None = args.token_env
+    if token_env_name is not None:
+        if not token_env_name.strip() or not all(
+            ch.isalnum() or ch == "_" for ch in token_env_name
+        ):
+            _emit_error(
+                f"Invalid --token-env variable name {token_env_name!r}.",
+                as_json=args.json,
+                code="INGEST_INVALID_TOKEN_ENV",
+            )
+            return EXIT_INVALID
+        token = os.environ.get(token_env_name)
+        if not token:
+            _emit_error(
+                f"Environment variable {token_env_name!r} is not set or empty. "
+                "Export a read-only token there, or omit --token-env for unauthenticated public-repo mode.",
+                as_json=args.json,
+                code="INGEST_MISSING_TOKEN",
+            )
+            return EXIT_INVALID
+
+    store_root = Path(args.store).resolve()
+    if not store_root.is_dir():
+        _emit_error(
+            f"Store directory does not exist: {store_root}",
+            as_json=args.json,
+            code="INGEST_STORE_NOT_FOUND",
+        )
+        return EXIT_INVALID
+    store = GitRecordStore(store_root)
+
+    transport: HttpTransport
+    try:
+        if args.fixture_file is not None:
+            transport = FixtureHttpTransport.from_json_file(
+                args.fixture_file, trusted_origin=api_origin
+            )
+        else:
+            transport = UrllibGitHubTransport(trusted_origin=api_origin)
+    except (OSError, ValueError, json.JSONDecodeError, GitHubTransportError) as exc:
+        _emit_error(str(exc), as_json=args.json, code="INGEST_TRANSPORT_ERROR")
+        return EXIT_INVALID
+
+    client = GitHubRestClient(
+        transport=transport,
+        api_origin=api_origin,
+        token=token,
+        max_retries=args.max_retries,
+    )
+    adapter = GitHubReviewSourceAdapter(
+        client=client,
+        token_env_name=token_env_name,
+        capture_policy=policy,
+        per_page=args.per_page,
+    )
+    req = SourceRequest(
+        repository=args.repository,
+        since=args.since,
+        until=args.until,
+        states=(args.state,),
+        max_items=args.max_prs,
+        max_pages=args.max_pages,
+    )
+
+    try:
+        run_res = adapter.ingest_github(
+            req,
+            store=store,
+            write=bool(args.write),
+            run_id=args.run_id,
+        )
+    except (ValueError, StoreError) as exc:
+        _emit_error(str(exc), as_json=args.json, code="INGEST_EXECUTION_ERROR")
+        return EXIT_INVALID
+
+    safe_summary = run_res.to_safe_summary_dict()
+    cov = run_res.manifest.coverage
+
+    if args.json:
+        _emit_json(safe_summary)
+    else:
+        mode_lbl = "WRITTEN (inert evidence + run manifest persisted)" if run_res.written else "DRY-RUN (no files written)"
+        status_lbl = "COMPLETE" if cov.complete else "INCOMPLETE"
+        print(f"OneMind ingest github ({SCHEMA_VERSION} {PROTOCOL_STATUS}) — {mode_lbl}")
+        print(f"Run ID:           {run_res.manifest.run_id}")
+        print(f"Repository:       {args.repository} (origin={api_origin}, authenticated={client.authenticated})")
+        print(f"Window:           since={args.since or 'unbounded'} until={args.until or 'unbounded'} state={args.state}")
+        print(f"Limits:           max_prs={args.max_prs} max_pages={args.max_pages}")
+        print(f"Capture policy:   {policy.mode} (raw bodies never printed)")
+        print(f"Coverage status:  {status_lbl}")
+        print(
+            f"PRs:              enumerated={cov.prs_enumerated} completed={cov.prs_completed} "
+            f"incomplete={cov.prs_incomplete}"
+        )
+        print(
+            f"Pages & retries:  attempted={cov.pages_attempted} fetched={cov.pages_fetched} "
+            f"retries={cov.retries_performed}"
+        )
+        print(
+            f"Observed items:   reviews={cov.reviews_collected} review_comments={cov.review_comments_collected} "
+            f"issue_comments={cov.issue_comments_collected} unavailable={cov.unavailable_observations} "
+            f"filtered={cov.filtered_records}"
+        )
+        print(
+            f"Deduplication:    new={cov.new_observations} edited={cov.edited_observations} "
+            f"unchanged_dedup={cov.unchanged_deduplicated}"
+        )
+        if cov.oldest_source_timestamp or cov.newest_source_timestamp:
+            print(
+                f"Source timespan:  {cov.oldest_source_timestamp or 'n/a'} .. "
+                f"{cov.newest_source_timestamp or 'n/a'}"
+            )
+        if run_res.manifest_path:
+            print(f"Manifest saved:   {run_res.manifest_path}")
+        if cov.incomplete_reasons:
+            print(f"\nIncomplete reasons: {', '.join(cov.incomplete_reasons)}")
+        if cov.endpoint_gaps:
+            print("\nEndpoint gaps:")
+            for g in cov.endpoint_gaps:
+                pr_tag = f" (PR #{g.pr_number})" if g.pr_number is not None else ""
+                st_tag = f" HTTP {g.http_status}" if g.http_status is not None else ""
+                print(f"  ! [{g.reason_code}] {g.endpoint}{pr_tag}{st_tag}: {g.message}")
+        if not run_res.written:
+            print("\nDry run complete. Re-run with --write to persist inert Evidence and run manifest.")
+        print(f"\nNote: {run_res.manifest.disclaimer}")
+
+    return EXIT_OK if cov.complete else EXIT_INDETERMINATE
+
+
+# ---------------------------------------------------------------------------
 # Parser & Entrypoint
 # ---------------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
@@ -1036,6 +1208,106 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_validate.add_argument("--json", action="store_true", help="Emit machine-readable JSON to stdout.")
     p_validate.set_defaults(func=_cmd_validate)
+
+    # ingest
+    p_ingest = sub.add_parser(
+        "ingest",
+        help="Opt-in read-only external evidence ingestion (dry-run by default).",
+    )
+    ingest_sub = p_ingest.add_subparsers(dest="provider", required=True)
+    p_ing_gh = ingest_sub.add_parser(
+        "github",
+        help="Read-only GitHub PR review-history ingestion (produces inert Evidence + coverage manifest).",
+    )
+    p_ing_gh.add_argument(
+        "--repository",
+        required=True,
+        help="Target GitHub repository in OWNER/REPO format.",
+    )
+    p_ing_gh.add_argument(
+        "--store",
+        default=".",
+        help="Path to local OneMind repository/store root (default: .).",
+    )
+    p_ing_gh.add_argument(
+        "--since",
+        default=None,
+        help="Lower bound for PR updated_at (YYYY-MM-DD or RFC 3339 UTC timestamp).",
+    )
+    p_ing_gh.add_argument(
+        "--until",
+        default=None,
+        help="Upper bound for PR updated_at (YYYY-MM-DD or RFC 3339 UTC timestamp).",
+    )
+    p_ing_gh.add_argument(
+        "--state",
+        default="all",
+        choices=sorted(VALID_PR_STATES),
+        help="PR state filter: all, open, closed, or merged (default: all).",
+    )
+    p_ing_gh.add_argument(
+        "--max-prs",
+        type=int,
+        default=100,
+        help="Maximum PRs to enumerate (truncation marks coverage incomplete; default: 100).",
+    )
+    p_ing_gh.add_argument(
+        "--max-pages",
+        type=int,
+        default=20,
+        help="Maximum pagination pages per endpoint (truncation marks incomplete; default: 20).",
+    )
+    p_ing_gh.add_argument(
+        "--per-page",
+        type=int,
+        default=100,
+        help="Items requested per GitHub REST page (1..100; default: 100).",
+    )
+    p_ing_gh.add_argument(
+        "--capture-policy",
+        default="metadata-only",
+        choices=sorted(VALID_CAPTURE_MODES),
+        help="Data capture privacy mode: 'metadata-only' (default) or explicit opt-in 'redacted-excerpt'.",
+    )
+    p_ing_gh.add_argument(
+        "--max-excerpt-chars",
+        type=int,
+        default=DEFAULT_MAX_EXCERPT_CHARS,
+        help=f"Maximum redacted excerpt characters when using redacted-excerpt (default: {DEFAULT_MAX_EXCERPT_CHARS}).",
+    )
+    p_ing_gh.add_argument(
+        "--token-env",
+        default=None,
+        help="Environment variable name holding a read-only GitHub token (never pass tokens as CLI args; omit for public unauthenticated mode).",
+    )
+    p_ing_gh.add_argument(
+        "--api-origin",
+        default=DEFAULT_GITHUB_API_ORIGIN,
+        help=f"Trusted HTTPS GitHub API origin (default: {DEFAULT_GITHUB_API_ORIGIN}).",
+    )
+    p_ing_gh.add_argument(
+        "--max-retries",
+        type=int,
+        default=3,
+        help="Maximum bounded retries on transient 429/5xx/rate-limit errors (default: 3).",
+    )
+    p_ing_gh.add_argument(
+        "--fixture-file",
+        default=None,
+        help="Optional offline JSON HTTP fixture file for deterministic replay without network access.",
+    )
+    p_ing_gh.add_argument(
+        "--run-id",
+        default=None,
+        help="Optional explicit run_id for the IngestionRun manifest.",
+    )
+    p_ing_gh.add_argument(
+        "--write",
+        action="store_true",
+        help="Atomically persist inert Evidence and IngestionRun manifest. Without --write, runs as dry-run.",
+    )
+    p_ing_gh.add_argument("--json", action="store_true", help="Emit safe machine-readable JSON to stdout.")
+    p_ing_gh.set_defaults(func=_cmd_ingest_github)
 
     return parser
 

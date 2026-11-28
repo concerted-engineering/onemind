@@ -44,6 +44,12 @@ from onemind.adapters.local_files import (
 )
 from onemind.api import propose_from_source
 from onemind.checks.registry import list_builtin_checkers, resolve_checker
+from onemind.discovery import (
+    DEFAULT_MIN_INDEPENDENT_PRS,
+    discover_recurring_corrections,
+    reconcile_candidates,
+    render_review_digest_markdown,
+)
 from onemind.governance.policy import load_policy
 from onemind.governance.projection import project_effective_state
 from onemind.protocol.canonical import canonical_sha256, excerpt_sha256
@@ -1073,6 +1079,270 @@ def _cmd_ingest_github(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Subcommands: discover, reconcile, review-digest (M2B)
+# ---------------------------------------------------------------------------
+def _load_candidates_file(path_str: str) -> list[RecordDict]:
+    path = Path(path_str)
+    if not path.is_file():
+        raise FileNotFoundError(f"Candidates file not found: {path}")
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(raw, list):
+        return [r for r in raw if isinstance(r, dict) and r.get("kind") == RecordKind.PRACTICE_CANDIDATE]
+    if isinstance(raw, dict):
+        cands = raw.get("candidates")
+        if isinstance(cands, list):
+            return [r for r in cands if isinstance(r, dict) and r.get("kind") == RecordKind.PRACTICE_CANDIDATE]
+        if raw.get("kind") == RecordKind.PRACTICE_CANDIDATE:
+            return [raw]
+    raise ValueError(
+        f"Candidates file {path} must be a JSON array of practice_candidate records or a discover output object."
+    )
+
+
+def _cmd_discover(args: argparse.Namespace) -> int:
+    repo_root = Path(args.repo).resolve()
+    if not repo_root.is_dir():
+        _emit_error(f"Repository directory not found: {repo_root}", as_json=args.json, code="DISCOVER_INPUT_ERROR")
+        return EXIT_INVALID
+    if args.min_independent_prs < 1:
+        _emit_error("--min-independent-prs must be >= 1.", as_json=args.json, code="DISCOVER_INPUT_ERROR")
+        return EXIT_INVALID
+
+    store = GitRecordStore(repo_root)
+    try:
+        all_records = store.list_records()
+        ingestion_runs = store.list_ingestion_runs()
+    except (OSError, ValueError, json.JSONDecodeError, StoreError) as exc:
+        _emit_error(str(exc), as_json=args.json, code="DISCOVER_LOAD_ERROR")
+        return EXIT_INVALID
+
+    evidence_records = [r for r in all_records if r.get("kind") == RecordKind.EVIDENCE]
+    report = discover_recurring_corrections(
+        evidence_records,
+        repository=args.repository,
+        source_filter=args.source,
+        min_independent_prs=args.min_independent_prs,
+        ingestion_runs=ingestion_runs,
+    )
+
+    written_ids: list[str] = []
+    if args.write:
+        existing_ids = {str(r["record_id"]) for r in all_records}
+        new_cands = [c for c in report.proposed_candidates if str(c["record_id"]) not in existing_ids]
+        if new_cands:
+            val = validate_records([*all_records, *new_cands])
+            if not val.valid:
+                msg = "; ".join(f"[{e.code}] {e.message}" for e in val.errors)
+                _emit_error(f"Refused to write invalid candidates: {msg}", as_json=args.json, code="DISCOVER_VALIDATION_ERROR")
+                return EXIT_INVALID
+            written_ids = store.append_many(new_cands)
+
+    payload = report.to_dict()
+    payload["written"] = bool(args.write)
+    payload["written_candidate_ids"] = written_ids
+
+    output_path_str: str | None = None
+    if args.output:
+        out_path = Path(args.output)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(
+            json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        output_path_str = str(out_path)
+        payload["standalone_output_file"] = output_path_str
+
+    if args.json:
+        _emit_json(payload)
+        if output_path_str:
+            sys.stderr.write(
+                f"notice: wrote standalone proposals JSON to {output_path_str} "
+                f"(canonical store modified={bool(args.write)}).\n"
+            )
+    else:
+        mode = "WRITTEN (inert candidates persisted)" if args.write else "READ-ONLY (no canonical records written)"
+        status = "COMPLETE" if report.corpus_complete else "INCOMPLETE"
+        print(f"OneMind discover ({SCHEMA_VERSION} {PROTOCOL_STATUS}) — {mode}")
+        print(f"Corpus status:      {status}")
+        print(
+            f"Evidence inspected: {report.extraction.total_input_evidence} "
+            f"(extracted={len(report.extraction.corrections)}, filtered={len(report.extraction.filtered)}, "
+            f"superseded={len(report.extraction.superseded_record_ids)}, "
+            f"missing_text={report.extraction.missing_redacted_text_count})"
+        )
+        print(
+            f"Clusters:           {len(report.clusters)} total "
+            f"(meeting min_independent_prs={args.min_independent_prs}: {len(report.proposed_candidates)}, "
+            f"below threshold: {len(report.insufficient_support_clusters)}, "
+            f"contradictory pairs: {len(report.contradictory_cluster_pairs)})"
+        )
+        for c in report.clusters:
+            tag = "CANDIDATE" if c.meets_min_support else "BELOW-THRESHOLD"
+            print(
+                f"  - [{tag}] {c.candidate_record['record_id']} ({c.category_label}, {c.polarity}, "
+                f"prs={c.support.independent_pr_count}, comments={c.support.total_source_comments}, "
+                f"uncertainty={c.uncertainty_level}): {c.statement}"
+            )
+        if report.coverage_warnings:
+            print("\nCoverage warnings:")
+            for w in report.coverage_warnings:
+                print(f"  ! {w}")
+        if output_path_str:
+            print(
+                f"\nStandalone file written: {output_path_str} "
+                "(explicit --output side effect; no PR created, no practices approved)."
+            )
+        if written_ids:
+            print(f"\nPersisted {len(written_ids)} inert PracticeCandidate record(s): {written_ids}")
+        print(f"\nNote: {report.disclaimer}")
+
+    return EXIT_OK if report.corpus_complete else EXIT_INDETERMINATE
+
+
+def _cmd_reconcile(args: argparse.Namespace) -> int:
+    repo_root = Path(args.repo).resolve()
+    if not repo_root.is_dir():
+        _emit_error(f"Repository directory not found: {repo_root}", as_json=args.json, code="RECONCILE_INPUT_ERROR")
+        return EXIT_INVALID
+
+    store = GitRecordStore(repo_root)
+    try:
+        existing_records = store.list_records()
+        if args.candidates_file:
+            candidates = _load_candidates_file(args.candidates_file)
+        else:
+            candidates = [r for r in existing_records if r.get("kind") == RecordKind.PRACTICE_CANDIDATE]
+    except (FileNotFoundError, ValueError, json.JSONDecodeError, StoreError) as exc:
+        _emit_error(str(exc), as_json=args.json, code="RECONCILE_LOAD_ERROR")
+        return EXIT_INVALID
+
+    report = reconcile_candidates(candidates, existing_records)
+
+    written_ids: list[str] = []
+    if args.write:
+        existing_ids = {str(r["record_id"]) for r in existing_records}
+        # Persist any referenced external candidates not yet in store + new Conflict records atomically
+        referenced_ids: set[str] = set()
+        for conf in report.proposed_conflicts:
+            referenced_ids.add(str(conf["body"]["left_record_id"]))
+            referenced_ids.add(str(conf["body"]["right_record_id"]))
+        cands_to_write = [
+            c
+            for c in candidates
+            if str(c["record_id"]) not in existing_ids and str(c["record_id"]) in referenced_ids
+        ]
+        confs_to_write = [
+            conf for conf in report.proposed_conflicts if str(conf["record_id"]) not in existing_ids
+        ]
+        batch_to_write = [*cands_to_write, *confs_to_write]
+        if batch_to_write:
+            val = validate_records([*existing_records, *batch_to_write])
+            if not val.valid:
+                msg = "; ".join(f"[{e.code}] {e.message}" for e in val.errors)
+                _emit_error(f"Refused to write invalid reconciliation records: {msg}", as_json=args.json, code="RECONCILE_VALIDATION_ERROR")
+                return EXIT_INVALID
+            written_ids = store.append_many(batch_to_write)
+
+    payload = report.to_dict()
+    payload["written"] = bool(args.write)
+    payload["written_record_ids"] = written_ids
+
+    if args.json:
+        _emit_json(payload)
+    else:
+        mode = "WRITTEN (inert findings persisted)" if args.write else "READ-ONLY (no records written)"
+        print(f"OneMind reconcile ({SCHEMA_VERSION} {PROTOCOL_STATUS}) — {mode}")
+        print(
+            f"Evaluated {report.candidates_evaluated} candidate(s) against "
+            f"{report.existing_compared} existing record(s)"
+        )
+        print(f"Findings: {len(report.findings)} (proposed conflicts: {len(report.proposed_conflicts)})")
+        for f in report.findings:
+            conf_tag = f" conflict={f.conflict_record_id}" if f.conflict_record_id else ""
+            print(
+                f"  - [{f.classification}] {f.candidate_id} vs {f.existing_record_id} "
+                f"({f.existing_kind}, sim={f.similarity:.2f}{conf_tag}): {f.rationale}"
+            )
+        if written_ids:
+            print(f"\nPersisted {len(written_ids)} inert record(s): {written_ids}")
+        print(f"\nNote: {report.non_interference_notice}")
+
+    return EXIT_OK
+
+
+def _cmd_review_digest(args: argparse.Namespace) -> int:
+    repo_root = Path(args.repo).resolve()
+    if not repo_root.is_dir():
+        _emit_error(f"Repository directory not found: {repo_root}", as_json=args.json, code="DIGEST_INPUT_ERROR")
+        return EXIT_INVALID
+
+    store = GitRecordStore(repo_root)
+    try:
+        all_records = store.list_records()
+        ingestion_runs = store.list_ingestion_runs()
+        ext_candidates = _load_candidates_file(args.candidates_file) if args.candidates_file else None
+    except (FileNotFoundError, ValueError, json.JSONDecodeError, StoreError) as exc:
+        _emit_error(str(exc), as_json=args.json, code="DIGEST_LOAD_ERROR")
+        return EXIT_INVALID
+
+    evidence_records = [r for r in all_records if r.get("kind") == RecordKind.EVIDENCE]
+    discovery = discover_recurring_corrections(
+        evidence_records,
+        repository=args.repository,
+        source_filter=args.source,
+        min_independent_prs=args.min_independent_prs,
+        ingestion_runs=ingestion_runs,
+    )
+    cands_for_reconcile = (
+        ext_candidates if ext_candidates is not None else list(discovery.proposed_candidates)
+    )
+    reconciliation = reconcile_candidates(cands_for_reconcile, all_records)
+    markdown = render_review_digest_markdown(
+        discovery,
+        reconciliation,
+        repository_label=args.repository,
+    )
+
+    output_path_str: str | None = None
+    if args.output:
+        out_path = Path(args.output)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(markdown, encoding="utf-8")
+        output_path_str = str(out_path)
+
+    if args.json:
+        _emit_json(
+            {
+                "corpus_complete": discovery.corpus_complete,
+                "standalone_output_file": output_path_str,
+                "discovery": discovery.to_dict(),
+                "reconciliation": reconciliation.to_dict(),
+                "markdown": markdown,
+                "notice": (
+                    "Review digest is a non-authoritative human review document. "
+                    "No canonical records were modified, no PR was created, and no practice was approved."
+                ),
+            }
+        )
+        if output_path_str:
+            sys.stderr.write(
+                f"notice: wrote standalone Markdown review digest to {output_path_str} "
+                "(no canonical records modified; no PR created; no practices approved).\n"
+            )
+    else:
+        if output_path_str:
+            print(
+                f"Wrote standalone review digest to {output_path_str}\n"
+                "Side effect: standalone Markdown file only. No canonical .onemind/ records "
+                "modified, no GitHub PR created, and no practices activated or approved."
+            )
+        else:
+            sys.stdout.write(markdown)
+
+    return EXIT_OK if discovery.corpus_complete else EXIT_INDETERMINATE
+
+
+# ---------------------------------------------------------------------------
 # Parser & Entrypoint
 # ---------------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
@@ -1308,6 +1578,89 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_ing_gh.add_argument("--json", action="store_true", help="Emit safe machine-readable JSON to stdout.")
     p_ing_gh.set_defaults(func=_cmd_ingest_github)
+
+    # discover (M2B)
+    p_disc = sub.add_parser(
+        "discover",
+        help="Read-only deterministic discovery of recurring review corrections from redacted Evidence.",
+    )
+    p_disc.add_argument("--repo", default=".", help="Path to local OneMind repository/store root (default: .).")
+    p_disc.add_argument(
+        "--source",
+        default="all",
+        choices=("all", "github"),
+        help="Filter evidence source family: 'github' or 'all' (default: all).",
+    )
+    p_disc.add_argument("--repository", default=None, help="Optional OWNER/REPO filter.")
+    p_disc.add_argument(
+        "--min-independent-prs",
+        type=int,
+        default=DEFAULT_MIN_INDEPENDENT_PRS,
+        help=f"Configurable minimum independent PR occurrences (default: {DEFAULT_MIN_INDEPENDENT_PRS}; not policy authority).",
+    )
+    p_disc.add_argument(
+        "--output",
+        default=None,
+        help="Optional explicit path to write a standalone JSON proposal bundle (does not write canonical records).",
+    )
+    p_disc.add_argument(
+        "--write",
+        action="store_true",
+        help="Atomically persist valid inert PracticeCandidate records to .onemind/records/ after validation.",
+    )
+    p_disc.add_argument("--json", action="store_true", help="Emit machine-readable JSON to stdout.")
+    p_disc.set_defaults(func=_cmd_discover)
+
+    # reconcile (M2B)
+    p_rec = sub.add_parser(
+        "reconcile",
+        help="Read-only scope-aware reconciliation of candidate proposals against existing records.",
+    )
+    p_rec.add_argument("--repo", default=".", help="Path to local OneMind repository/store root (default: .).")
+    p_rec.add_argument(
+        "--candidates-file",
+        default=None,
+        help="Optional JSON file of candidates (e.g. from `onemind discover --output`). Defaults to store candidates.",
+    )
+    p_rec.add_argument(
+        "--write",
+        action="store_true",
+        help="Atomically persist valid inert Conflict (and referenced candidate) records after validation.",
+    )
+    p_rec.add_argument("--json", action="store_true", help="Emit machine-readable JSON to stdout.")
+    p_rec.set_defaults(func=_cmd_reconcile)
+
+    # review-digest (M2B)
+    p_dig = sub.add_parser(
+        "review-digest",
+        help="Render a human-facing Markdown proposal review digest (read-only; never creates a PR).",
+    )
+    p_dig.add_argument("--repo", default=".", help="Path to local OneMind repository/store root (default: .).")
+    p_dig.add_argument(
+        "--candidates-file",
+        default=None,
+        help="Optional JSON candidates file to reconcile in the digest.",
+    )
+    p_dig.add_argument(
+        "--source",
+        default="all",
+        choices=("all", "github"),
+        help="Filter evidence source family: 'github' or 'all' (default: all).",
+    )
+    p_dig.add_argument("--repository", default=None, help="Optional OWNER/REPO filter.")
+    p_dig.add_argument(
+        "--min-independent-prs",
+        type=int,
+        default=DEFAULT_MIN_INDEPENDENT_PRS,
+        help=f"Minimum independent PR occurrences (default: {DEFAULT_MIN_INDEPENDENT_PRS}).",
+    )
+    p_dig.add_argument(
+        "--output",
+        default=None,
+        help="Optional explicit path to write the standalone Markdown review digest.",
+    )
+    p_dig.add_argument("--json", action="store_true", help="Emit machine-readable JSON to stdout.")
+    p_dig.set_defaults(func=_cmd_review_digest)
 
     return parser
 

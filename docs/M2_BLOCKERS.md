@@ -1,17 +1,16 @@
 # M2 Blockers & Prerequisites
 
-**Status:** **M2A** (read-only GitHub PR review-history evidence ingestion and run-level coverage accounting) is implemented and offline-tested. **M2B / M2C** (verified GitHub governance proofs, trusted preflight execution, randomized pilot assignment, and outcome measurement) remain **explicitly deferred**. No empirical claims about engineering improvement may be made from synthetic fixtures or historical observations.
+**Status:** **M2A** (read-only GitHub PR review-history evidence ingestion and run-level coverage accounting) and **M2B** (deterministic recurring-correction discovery, independent-PR grouping, scope-aware reconciliation, inert conflict reporting, and human review digest) are implemented and offline-tested. **M2C** (verified GitHub governance proofs, privileged publisher separation, advisory PR preflight, held-out detector evaluation) and **M2D** (preregistered prospective outcome measurement) remain **explicitly deferred**. No empirical claims about engineering improvement may be made from synthetic fixtures or historical observations.
 
-Before enabling verified governance promotion, active preflight, or prospective experimentation in M2B+, every remaining prerequisite below must be designed, security-reviewed, and backed by automated conformance tests.
+Before enabling verified governance promotion, active preflight, or prospective experimentation in M2C/M2D, every remaining prerequisite below must be designed, security-reviewed, and backed by automated conformance tests.
 
-## 1. Real GitHub Evidence Ingestion and Coverage Accounting — **Resolved (M2A)**
+## 1. Real GitHub Evidence Ingestion, Coverage Accounting & Candidate Discovery — **Resolved (M2A + M2B)**
 
-- Implemented read-only [`GitHubReviewSourceAdapter`](../src/onemind/adapters/github/adapter.py) (`onemind ingest github`) over an injectable origin-constrained stdlib HTTPS transport (`UrllibGitHubTransport` / `FixtureHttpTransport`), supporting RFC 8288 `Link` pagination, loop/truncation detection, bounded exponential retries with injectable clock/sleep, and deterministic edit/deduplication versioning.
-- Implemented immutable append-only `IngestionRun` coverage manifests (`.onemind/ingestions/<run_id>/manifest.json`, verified under `onemind validate --trusted-base`) per [ADR-0002](decisions/0002-m2a-github-evidence-ingestion.md), capturing complete vs. incomplete coverage, endpoint gaps, filtered items, and timestamps without fabricating practice/application IDs.
-- Implemented explicit `DataCapturePolicy` (`metadata-only` default; opt-in `redacted-excerpt` with deterministic secret/PII redaction and documented limitations).
-- *Remaining live operational note:* Live GitHub API ingestion requires explicit user opt-in and a read-only token via `--token-env` (or public unauthenticated access within GitHub rate limits); automated test suites remain 100% offline.
+- **M2A:** Implemented read-only [`GitHubReviewSourceAdapter`](../src/onemind/adapters/github/adapter.py) (`onemind ingest github`) over an injectable origin-constrained stdlib HTTPS transport, supporting RFC 8288 `Link` pagination, loop/truncation detection, bounded retries with injectable clock/sleep, deterministic edit/deduplication versioning, explicit `DataCapturePolicy` (`metadata-only` default; opt-in `redacted-excerpt`), and immutable `IngestionRun` coverage manifests (`.onemind/ingestions/<run_id>/manifest.json`, verified under `--trusted-base`; [ADR-0002](decisions/0002-m2a-github-evidence-ingestion.md)).
+- **M2B:** Implemented zero-LLM [`DeterministicReviewExtractor`](../src/onemind/discovery/extractor.py), independent-PR occurrence grouping ([`discover_recurring_corrections`](../src/onemind/discovery/clustering.py)), 6-way scope-aware non-interfering reconciliation ([`reconcile_candidates`](../src/onemind/discovery/reconcile.py)), read-only Markdown review digests ([`render_review_digest_markdown`](../src/onemind/discovery/digest.py)), CLI commands (`discover`, `reconcile`, `review-digest`), and synthetic gold + independent held-out corpus evaluation ([ADR-0003](decisions/0003-m2b-discovery-clustering-reconciliation.md)).
+- *Remaining live operational note:* Live GitHub API ingestion requires explicit user opt-in; automated test suites remain 100% offline.
 
-## 2. Verified Reviewer Authority and Protected-Merge Checks (M2B — Open)
+## 2. Verified Reviewer Authority and Protected-Merge Checks (M2C — Open)
 
 - Replace local proof-structure checks with a live `AuthorityVerifier` anchored to GitHub's protected-branch rulesets, CODEOWNERS / qualifying reviewer lists, and exact review-commit-to-merge-commit binding.
 - Verify that the approved content's RFC 8785 canonical SHA-256 digest matches the exact commit reviewed by a qualifying human reviewer and merged through branch protection (rejecting post-approval pushes, self-approvals where disallowed, and bypassed merges).

@@ -1,0 +1,92 @@
+{
+  "corpus_name": "discovery-gold-corpus",
+  "expected_clusters": [
+    {
+      "evidence_ids": [
+        "gold-ev-api-1a",
+        "gold-ev-api-1b",
+        "gold-ev-api-2-edited"
+      ],
+      "expected_independent_prs": 2,
+      "expected_scope": {
+        "paths": [
+          "api/schemas/**"
+        ],
+        "repository": "synthetic/payments-core"
+      },
+      "label": "api-response-compat"
+    },
+    {
+      "evidence_ids": [
+        "gold-ev-cache-req-1",
+        "gold-ev-cache-req-2"
+      ],
+      "expected_independent_prs": 2,
+      "expected_scope": {
+        "paths": [
+          "services/billing/**"
+        ],
+        "repository": "synthetic/payments-core"
+      },
+      "label": "billing-cache-require"
+    },
+    {
+      "evidence_ids": [
+        "gold-ev-cache-forbid-1",
+        "gold-ev-cache-forbid-2"
+      ],
+      "expected_independent_prs": 2,
+      "expected_scope": {
+        "paths": [
+          "services/billing/**"
+        ],
+        "repository": "synthetic/payments-core"
+      },
+      "label": "billing-cache-forbid"
+    },
+    {
+      "evidence_ids": [
+        "gold-ev-exc-1",
+        "gold-ev-exc-2"
+      ],
+      "expected_independent_prs": 2,
+      "expected_scope": {
+        "paths": [
+          "api/internal/**"
+        ],
+        "repository": "synthetic/payments-core"
+      },
+      "label": "internal-api-exception"
+    },
+    {
+      "evidence_ids": [
+        "gold-ev-single-pr"
+      ],
+      "expected_independent_prs": 1,
+      "expected_scope": {
+        "paths": [
+          "db/migrations/**"
+        ],
+        "repository": "synthetic/payments-core"
+      },
+      "label": "migration-rollback-single-pr"
+    }
+  ],
+  "expected_contradictions": 1,
+  "expected_corpus_complete": false,
+  "expected_detected_evidence_ids": [
+    "gold-ev-api-1a",
+    "gold-ev-api-1b",
+    "gold-ev-api-2-edited",
+    "gold-ev-cache-req-1",
+    "gold-ev-cache-req-2",
+    "gold-ev-cache-forbid-1",
+    "gold-ev-cache-forbid-2",
+    "gold-ev-exc-1",
+    "gold-ev-exc-2",
+    "gold-ev-single-pr"
+  ],
+  "min_independent_prs": 2,
+  "repository": "synthetic/payments-core",
+  "synthetic": true
+}

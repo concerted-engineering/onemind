@@ -1,0 +1,381 @@
+[
+  {
+    "actor": {
+      "id": "adapter:github-review-history",
+      "type": "service"
+    },
+    "body": {
+      "excerpt_sha256": "04e093adc22d07ff1fabe209c1450f068496ad2cec95c74d8e2d6095dedd8b69",
+      "observed_at": "2026-11-25T00:00:00Z",
+      "redacted_snapshot": "Must use parameterized SQL queries instead of string interpolation in database handlers.",
+      "redaction": {
+        "original_length": 88,
+        "patterns_applied": [],
+        "policy": "redacted-excerpt",
+        "redaction_count": 0,
+        "redactor_version": "onemind-redactor/0.1-draft",
+        "snapshot_omitted": false,
+        "truncated": false
+      },
+      "source_author": "grace",
+      "source_id": "synthetic/analytics-engine#pr501:comment:5001",
+      "source_revision": "sha-501@2026-10-04T09:00:00Z",
+      "source_state": "available",
+      "source_type": "github-pr-review-comment",
+      "source_uri": "https://github.com/synthetic/analytics-engine/pull/501#item-5001"
+    },
+    "created_at": "2026-11-25T00:00:00Z",
+    "extensions": {
+      "github": {
+        "github_id": "5001",
+        "path": "db/queries/reports.py",
+        "pr_base_sha": "base501",
+        "pr_head_sha": "head501",
+        "pr_number": 501,
+        "repository": "synthetic/analytics-engine",
+        "source_created_at": "2026-10-04T09:00:00Z",
+        "source_updated_at": "2026-10-04T09:00:00Z"
+      }
+    },
+    "kind": "evidence",
+    "record_id": "held-ev-sql-1",
+    "schema_version": "0.1-draft"
+  },
+  {
+    "actor": {
+      "id": "adapter:github-review-history",
+      "type": "service"
+    },
+    "body": {
+      "excerpt_sha256": "4e629acf530d668b477b73fa36141948702ed144ec0df5a79fea210584ccca4e",
+      "observed_at": "2026-11-25T00:00:00Z",
+      "redacted_snapshot": "Always require parameterized SQL queries when executing database queries.",
+      "redaction": {
+        "original_length": 73,
+        "patterns_applied": [],
+        "policy": "redacted-excerpt",
+        "redaction_count": 0,
+        "redactor_version": "onemind-redactor/0.1-draft",
+        "snapshot_omitted": false,
+        "truncated": false
+      },
+      "source_author": "heidi",
+      "source_id": "synthetic/analytics-engine#pr502:review:5002",
+      "source_revision": "sha-502@2026-10-09T14:00:00Z",
+      "source_state": "available",
+      "source_type": "github-pr-review",
+      "source_uri": "https://github.com/synthetic/analytics-engine/pull/502#item-5002"
+    },
+    "created_at": "2026-11-25T00:00:00Z",
+    "extensions": {
+      "github": {
+        "github_id": "5002",
+        "path": "db/queries/exports.py",
+        "pr_base_sha": "base502",
+        "pr_head_sha": "head502",
+        "pr_number": 502,
+        "repository": "synthetic/analytics-engine",
+        "review_state": "CHANGES_REQUESTED",
+        "source_created_at": "2026-10-09T14:00:00Z",
+        "source_updated_at": "2026-10-09T14:00:00Z"
+      }
+    },
+    "kind": "evidence",
+    "record_id": "held-ev-sql-2",
+    "schema_version": "0.1-draft"
+  },
+  {
+    "actor": {
+      "id": "adapter:github-review-history",
+      "type": "service"
+    },
+    "body": {
+      "excerpt_sha256": "9f78e90ab67c0b92775c807075f5b07c110016c6cebe7f05023e4a3e65753bcd",
+      "observed_at": "2026-11-25T00:00:00Z",
+      "redacted_snapshot": "Never log raw bearer tokens or credentials in audit worker logs.",
+      "redaction": {
+        "original_length": 64,
+        "patterns_applied": [],
+        "policy": "redacted-excerpt",
+        "redaction_count": 0,
+        "redactor_version": "onemind-redactor/0.1-draft",
+        "snapshot_omitted": false,
+        "truncated": false
+      },
+      "source_author": "ivan",
+      "source_id": "synthetic/analytics-engine#pr503:comment:5003",
+      "source_revision": "sha-503@2026-10-11T10:00:00Z",
+      "source_state": "available",
+      "source_type": "github-pr-review-comment",
+      "source_uri": "https://github.com/synthetic/analytics-engine/pull/503#item-5003"
+    },
+    "created_at": "2026-11-25T00:00:00Z",
+    "extensions": {
+      "github": {
+        "github_id": "5003",
+        "path": "workers/audit/sink.py",
+        "pr_base_sha": "base503",
+        "pr_head_sha": "head503",
+        "pr_number": 503,
+        "repository": "synthetic/analytics-engine",
+        "source_created_at": "2026-10-11T10:00:00Z",
+        "source_updated_at": "2026-10-11T10:00:00Z"
+      }
+    },
+    "kind": "evidence",
+    "record_id": "held-ev-log-1a",
+    "schema_version": "0.1-draft"
+  },
+  {
+    "actor": {
+      "id": "adapter:github-review-history",
+      "type": "service"
+    },
+    "body": {
+      "excerpt_sha256": "3713e8307018672729cf28d3f154b41a783cf2559b840af96d62905fae66bc0c",
+      "observed_at": "2026-11-25T00:00:00Z",
+      "redacted_snapshot": "Do not serialize authorization tokens into audit worker logs.",
+      "redaction": {
+        "original_length": 61,
+        "patterns_applied": [],
+        "policy": "redacted-excerpt",
+        "redaction_count": 0,
+        "redactor_version": "onemind-redactor/0.1-draft",
+        "snapshot_omitted": false,
+        "truncated": false
+      },
+      "source_author": "ivan",
+      "source_id": "synthetic/analytics-engine#pr503:comment:5004",
+      "source_revision": "sha-503@2026-10-11T10:10:00Z",
+      "source_state": "available",
+      "source_type": "github-pr-review-comment",
+      "source_uri": "https://github.com/synthetic/analytics-engine/pull/503#item-5004"
+    },
+    "created_at": "2026-11-25T00:00:00Z",
+    "extensions": {
+      "github": {
+        "github_id": "5004",
+        "path": "workers/audit/sink.py",
+        "pr_base_sha": "base503",
+        "pr_head_sha": "head503",
+        "pr_number": 503,
+        "repository": "synthetic/analytics-engine",
+        "source_created_at": "2026-10-11T10:10:00Z",
+        "source_updated_at": "2026-10-11T10:10:00Z"
+      }
+    },
+    "kind": "evidence",
+    "record_id": "held-ev-log-1b",
+    "schema_version": "0.1-draft"
+  },
+  {
+    "actor": {
+      "id": "adapter:github-review-history",
+      "type": "service"
+    },
+    "body": {
+      "excerpt_sha256": "d9982c2ee961be55192daa10a6489ba3c86292294255156d348dcb9fda5823f2",
+      "observed_at": "2026-11-25T00:00:00Z",
+      "redacted_snapshot": "Audit workers must not print credentials or bearer tokens to structured logs.",
+      "redaction": {
+        "original_length": 77,
+        "patterns_applied": [],
+        "policy": "redacted-excerpt",
+        "redaction_count": 0,
+        "redactor_version": "onemind-redactor/0.1-draft",
+        "snapshot_omitted": false,
+        "truncated": false
+      },
+      "source_author": "judy",
+      "source_id": "synthetic/analytics-engine#pr504:review:5005",
+      "source_revision": "sha-504@2026-10-15T16:00:00Z",
+      "source_state": "available",
+      "source_type": "github-pr-review",
+      "source_uri": "https://github.com/synthetic/analytics-engine/pull/504#item-5005"
+    },
+    "created_at": "2026-11-25T00:00:00Z",
+    "extensions": {
+      "github": {
+        "github_id": "5005",
+        "path": "workers/audit/processor.py",
+        "pr_base_sha": "base504",
+        "pr_head_sha": "head504",
+        "pr_number": 504,
+        "repository": "synthetic/analytics-engine",
+        "review_state": "CHANGES_REQUESTED",
+        "source_created_at": "2026-10-15T16:00:00Z",
+        "source_updated_at": "2026-10-15T16:00:00Z"
+      }
+    },
+    "kind": "evidence",
+    "record_id": "held-ev-log-2",
+    "schema_version": "0.1-draft"
+  },
+  {
+    "actor": {
+      "id": "adapter:github-review-history",
+      "type": "service"
+    },
+    "body": {
+      "excerpt_sha256": "34ae5127b7eba550b15aaff547120bb787940c7a6883491107e385417630bda5",
+      "observed_at": "2026-11-25T00:00:00Z",
+      "redacted_snapshot": "Outbound webhook requests must configure bounded retry backoff.",
+      "redaction": {
+        "original_length": 63,
+        "patterns_applied": [],
+        "policy": "redacted-excerpt",
+        "redaction_count": 0,
+        "redactor_version": "onemind-redactor/0.1-draft",
+        "snapshot_omitted": false,
+        "truncated": false
+      },
+      "source_author": "grace",
+      "source_id": "synthetic/analytics-engine#pr505:comment:5006",
+      "source_revision": "sha-505@2026-10-18T11:00:00Z",
+      "source_state": "available",
+      "source_type": "github-pr-review-comment",
+      "source_uri": "https://github.com/synthetic/analytics-engine/pull/505#item-5006"
+    },
+    "created_at": "2026-11-25T00:00:00Z",
+    "extensions": {
+      "github": {
+        "github_id": "5006",
+        "path": "workers/webhooks/sender.py",
+        "pr_base_sha": "base505",
+        "pr_head_sha": "head505",
+        "pr_number": 505,
+        "repository": "synthetic/analytics-engine",
+        "source_created_at": "2026-10-18T11:00:00Z",
+        "source_updated_at": "2026-10-18T11:00:00Z"
+      }
+    },
+    "kind": "evidence",
+    "record_id": "held-ev-retry-single",
+    "schema_version": "0.1-draft"
+  },
+  {
+    "actor": {
+      "id": "adapter:github-review-history",
+      "type": "service"
+    },
+    "body": {
+      "excerpt_sha256": "373945f04afdebb1d606e323b1ebf832d7879ab64e71f901826af06ebb161b29",
+      "observed_at": "2026-11-25T00:00:00Z",
+      "redacted_snapshot": "This PR was automatically generated by renovate.",
+      "redaction": {
+        "original_length": 48,
+        "patterns_applied": [],
+        "policy": "redacted-excerpt",
+        "redaction_count": 0,
+        "redactor_version": "onemind-redactor/0.1-draft",
+        "snapshot_omitted": false,
+        "truncated": false
+      },
+      "source_author": "renovate[bot]",
+      "source_id": "synthetic/analytics-engine#pr506:comment:5007",
+      "source_revision": "sha-506@2026-10-19T08:00:00Z",
+      "source_state": "available",
+      "source_type": "github-pr-issue-comment",
+      "source_uri": "https://github.com/synthetic/analytics-engine/pull/506#item-5007"
+    },
+    "created_at": "2026-11-25T00:00:00Z",
+    "extensions": {
+      "github": {
+        "github_id": "5007",
+        "pr_base_sha": "base506",
+        "pr_head_sha": "head506",
+        "pr_number": 506,
+        "repository": "synthetic/analytics-engine",
+        "source_created_at": "2026-10-19T08:00:00Z",
+        "source_updated_at": "2026-10-19T08:00:00Z"
+      }
+    },
+    "kind": "evidence",
+    "record_id": "held-ev-bot",
+    "schema_version": "0.1-draft"
+  },
+  {
+    "actor": {
+      "id": "adapter:github-review-history",
+      "type": "service"
+    },
+    "body": {
+      "excerpt_sha256": "0c8ef09d49ff0cc1aa8500d9452b09f8778fe414936a226a9b00c023c0a4d2c9",
+      "observed_at": "2026-11-25T00:00:00Z",
+      "redacted_snapshot": "Looks good to me!",
+      "redaction": {
+        "original_length": 17,
+        "patterns_applied": [],
+        "policy": "redacted-excerpt",
+        "redaction_count": 0,
+        "redactor_version": "onemind-redactor/0.1-draft",
+        "snapshot_omitted": false,
+        "truncated": false
+      },
+      "source_author": "heidi",
+      "source_id": "synthetic/analytics-engine#pr507:review:5008",
+      "source_revision": "sha-507@2026-10-19T09:00:00Z",
+      "source_state": "available",
+      "source_type": "github-pr-review",
+      "source_uri": "https://github.com/synthetic/analytics-engine/pull/507#item-5008"
+    },
+    "created_at": "2026-11-25T00:00:00Z",
+    "extensions": {
+      "github": {
+        "github_id": "5008",
+        "pr_base_sha": "base507",
+        "pr_head_sha": "head507",
+        "pr_number": 507,
+        "repository": "synthetic/analytics-engine",
+        "review_state": "APPROVED",
+        "source_created_at": "2026-10-19T09:00:00Z",
+        "source_updated_at": "2026-10-19T09:00:00Z"
+      }
+    },
+    "kind": "evidence",
+    "record_id": "held-ev-compliment",
+    "schema_version": "0.1-draft"
+  },
+  {
+    "actor": {
+      "id": "adapter:github-review-history",
+      "type": "service"
+    },
+    "body": {
+      "excerpt_sha256": "1954b5fc7a30890c6c25a1bdd7c54277e49b1b20322e376e3fb0f73c258d7b8e",
+      "observed_at": "2026-11-25T00:00:00Z",
+      "redacted_snapshot": "Nit: blank lines between imports should follow personal preference.",
+      "redaction": {
+        "original_length": 67,
+        "patterns_applied": [],
+        "policy": "redacted-excerpt",
+        "redaction_count": 0,
+        "redactor_version": "onemind-redactor/0.1-draft",
+        "snapshot_omitted": false,
+        "truncated": false
+      },
+      "source_author": "ivan",
+      "source_id": "synthetic/analytics-engine#pr508:comment:5009",
+      "source_revision": "sha-508@2026-10-19T10:00:00Z",
+      "source_state": "available",
+      "source_type": "github-pr-review-comment",
+      "source_uri": "https://github.com/synthetic/analytics-engine/pull/508#item-5009"
+    },
+    "created_at": "2026-11-25T00:00:00Z",
+    "extensions": {
+      "github": {
+        "github_id": "5009",
+        "path": "workers/audit/sink.py",
+        "pr_base_sha": "base508",
+        "pr_head_sha": "head508",
+        "pr_number": 508,
+        "repository": "synthetic/analytics-engine",
+        "source_created_at": "2026-10-19T10:00:00Z",
+        "source_updated_at": "2026-10-19T10:00:00Z"
+      }
+    },
+    "kind": "evidence",
+    "record_id": "held-ev-style",
+    "schema_version": "0.1-draft"
+  }
+]

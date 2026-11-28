@@ -1,0 +1,60 @@
+{
+  "corpus_name": "discovery-heldout-corpus",
+  "expected_clusters": [
+    {
+      "evidence_ids": [
+        "held-ev-sql-1",
+        "held-ev-sql-2"
+      ],
+      "expected_independent_prs": 2,
+      "expected_scope": {
+        "paths": [
+          "db/queries/**"
+        ],
+        "repository": "synthetic/analytics-engine"
+      },
+      "label": "parameterized-sql"
+    },
+    {
+      "evidence_ids": [
+        "held-ev-log-1a",
+        "held-ev-log-1b",
+        "held-ev-log-2"
+      ],
+      "expected_independent_prs": 2,
+      "expected_scope": {
+        "paths": [
+          "workers/audit/**"
+        ],
+        "repository": "synthetic/analytics-engine"
+      },
+      "label": "no-log-secrets"
+    },
+    {
+      "evidence_ids": [
+        "held-ev-retry-single"
+      ],
+      "expected_independent_prs": 1,
+      "expected_scope": {
+        "paths": [
+          "workers/webhooks/**"
+        ],
+        "repository": "synthetic/analytics-engine"
+      },
+      "label": "webhook-retry-single-pr"
+    }
+  ],
+  "expected_contradictions": 0,
+  "expected_corpus_complete": true,
+  "expected_detected_evidence_ids": [
+    "held-ev-sql-1",
+    "held-ev-sql-2",
+    "held-ev-log-1a",
+    "held-ev-log-1b",
+    "held-ev-log-2",
+    "held-ev-retry-single"
+  ],
+  "min_independent_prs": 2,
+  "repository": "synthetic/analytics-engine",
+  "synthetic": true
+}

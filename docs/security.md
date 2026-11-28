@@ -44,6 +44,12 @@
    - Persisted `IngestionRun` manifests under `.onemind/ingestions/` are immutable and verified by `onemind validate --trusted-base`.
    - Ingested GitHub reviews and comments are strictly inert `Evidence`; GitHub review states (`APPROVED`, `CHANGES_REQUESTED`) never confer OneMind governance authority.
 
+8. **M2B discovery, reconciliation & review-digest boundaries (`discover`, `reconcile`, `review-digest`).**
+   - Operates strictly on locally stored, explicitly opted-in `redacted_snapshot` evidence; `metadata-only` records are skipped and explicitly flagged as incomplete coverage (`missing_redacted_text`).
+   - Filters prompt-injection directives, bot chatter, withdrawn/deleted comments, and style preferences; comment text can never execute shell tools or create `PracticeVersion`/`GovernanceDecision`/`Application` records.
+   - Non-interference: candidate clustering and conflict detection never modify, suspend, retire, or alter effective resolution of existing approved practices.
+   - Read-only by default; standalone `--output` files make their side effect explicit and never create repository PRs or imply approval. Canonical `PracticeCandidate`/`Conflict` persistence requires explicit `--write` and full validation.
+
 ## 2. Known Security Limitations in M0 + M1
 
 - **No external cryptographic or GitHub API proof verification yet.** `DefaultAuthorityVerifier` validates proof structure and policy membership locally, but live verification against GitHub branch protection, signed commits, and merge-commit reviewer APIs is deferred to M2 (see `docs/M2_BLOCKERS.md`).

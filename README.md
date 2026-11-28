@@ -2,7 +2,7 @@
 
 > **Your team learns once. Every agent benefits.**
 
-**License:** Apache-2.0 · **Protocol:** `0.1-draft` (`experimental`) · **Scope:** M0 + M1 + M2A (local-first OSS core, CLI & opt-in read-only GitHub evidence ingestion)
+**License:** Apache-2.0 · **Protocol:** `0.1-draft` (`experimental`) · **Scope:** M0 + M1 + M2A + M2B (local-first OSS core, CLI, read-only GitHub evidence ingestion & recurring-correction discovery/reconciliation)
 
 OneMind is the open-source engineering-intelligence substrate of **Concerted Engineering**. It enables engineering teams to accumulate source-linked **Evidence**, propose inert **PracticeCandidates**, govern versioned **PracticeVersions** and **Applications** through explicit **GovernanceDecisions** and **Conflicts**, and record append-only **OutcomeEvents**—independently of any specific AI model, coding agent, CI system, or hosted service.
 
@@ -148,6 +148,23 @@ onemind ingest github \
 
 See [`examples/github-ingest-fixture/README.md`](examples/github-ingest-fixture/README.md) and [`docs/decisions/0002-m2a-github-evidence-ingestion.md`](docs/decisions/0002-m2a-github-evidence-ingestion.md) for the full offline walkthrough, edit/re-ingestion behavior, and privacy controls.
 
+## Recurring Correction Discovery, Reconciliation & Review Digest (M2B — Read-Only Default)
+
+Discover recurring corrections from explicitly opted-in redacted evidence using deterministic rules and independent-PR occurrence counting (never inflating support from repeated comments or edits in the same PR), reconcile against existing candidates/practices without altering approved state, and generate a human-facing review digest:
+
+```bash
+# 1. Read-only discovery (independent PR counting; dry-run by default)
+onemind discover --repo . --source github --min-independent-prs 2 --output ./proposals.json --json
+
+# 2. Scope-aware reconciliation & inert conflict reporting (non-interfering)
+onemind reconcile --repo . --candidates-file ./proposals.json --json
+
+# 3. Render a human-facing Markdown review digest (never creates a PR or approves practices)
+onemind review-digest --repo . --candidates-file ./proposals.json --output ./onemind-review.md
+```
+
+See [`docs/decisions/0003-m2b-discovery-clustering-reconciliation.md`](docs/decisions/0003-m2b-discovery-clustering-reconciliation.md) and the offline synthetic benchmark corpora under [`examples/discovery-gold-corpus/`](examples/discovery-gold-corpus/) and [`examples/discovery-heldout-corpus/`](examples/discovery-heldout-corpus/).
+
 ## Generic Workflow Composability
 
 OneMind defines minimal interfaces in [`src/onemind/adapters/interfaces.py`](src/onemind/adapters/interfaces.py) (`SourceAdapter`, `Extractor`, `AuthorityVerifier`, `Store`, `ApplicationAdapter`, `OutcomeSink`, `Reporter`). Two unrelated synthetic fixtures under [`examples/workflow-fixtures/`](examples/workflow-fixtures/)—a Markdown engineering retrospective (`MarkdownRetroAdapter`) and a structured JSON observation log (`JsonObservationAdapter`)—demonstrate identical ingestion, provenance preservation, non-authority, unified querying/resolution, and independent removability without coupling OneMind to any external workflow engine.
@@ -161,7 +178,8 @@ OneMind defines minimal interfaces in [`src/onemind/adapters/interfaces.py`](src
 - [`docs/security.md`](docs/security.md) — Security invariants, threat boundaries, and current limitations
 - [`docs/decisions/0001-m0-m1-protocol-and-trust-boundaries.md`](docs/decisions/0001-m0-m1-protocol-and-trust-boundaries.md) — M0 + M1 implementation ADR
 - [`docs/decisions/0002-m2a-github-evidence-ingestion.md`](docs/decisions/0002-m2a-github-evidence-ingestion.md) — M2A GitHub evidence ingestion & coverage manifest ADR
-- [`docs/M2_BLOCKERS.md`](docs/M2_BLOCKERS.md) — M2A completion status and remaining M2B+ prerequisites
+- [`docs/decisions/0003-m2b-discovery-clustering-reconciliation.md`](docs/decisions/0003-m2b-discovery-clustering-reconciliation.md) — M2B discovery, independent-PR clustering & reconciliation ADR
+- [`docs/M2_BLOCKERS.md`](docs/M2_BLOCKERS.md) — M2A/M2B completion status and remaining M2C/M2D blockers
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) · [`SECURITY.md`](SECURITY.md) · [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) · [`LICENSE`](LICENSE)
 
 ## Testing & Quality Checks

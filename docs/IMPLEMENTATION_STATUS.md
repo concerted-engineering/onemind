@@ -2,7 +2,7 @@
 
 **Last updated:** 2026-11-28  
 **Protocol version:** `0.1-draft` (`experimental`)  
-**Current milestone:** M0 + M1 + **M2A** (read-only GitHub review-history evidence ingestion; M2B+ governance/preflight/experiments explicitly deferred)
+**Current milestone:** M0 + M1 + M2A + **M2B** (read-only GitHub evidence ingestion + deterministic recurring-correction discovery, independent-PR grouping, scope-aware reconciliation, and human review digest; M2C/M2D explicitly deferred)
 
 ---
 
@@ -19,20 +19,22 @@
 | **Offline End-to-End Demo** | Implemented & tested | `examples/api-compat-demo/`, `scripts/demo.sh` | Self-contained ADR + breaking/compatible JSON schemas + 7 canonical records with explicit `local-owner-assertion` labels; demonstrates genuine breaking failure, genuine compatible pass, explicit capture, and trusted-base validation without claiming enterprise enforcement or empirical improvement. |
 | **Generic Workflow Composability** | Implemented & tested | `src/onemind/adapters/interfaces.py`, `markdown_retro.py`, `json_observation.py`, `examples/workflow-fixtures/` | Two unrelated synthetic formats (Markdown engineering retrospective & structured JSON observation) share `SourceAdapter` + `Extractor`, preserve independent provenance, ignore embedded authority claims, and remain independently removable. Zero external agent/workflow SDK dependencies verified by AST import audit. |
 | **M2A Read-Only GitHub Ingestion** | Implemented & offline-tested | `src/onemind/adapters/github/`, `cli.py` (`onemind ingest github`), `examples/github-ingest-fixture/` | Opt-in read-only `RemoteSourceAdapter` over narrow stdlib HTTPS transport; `metadata-only` default + opt-in `redacted-excerpt`; RFC 8288 pagination with loop/truncation/retry guards; deterministic dedup + immutable edit versioning; append-only `.onemind/ingestions/<run_id>/manifest.json` coverage manifests verified under `--trusted-base`. Zero practice activation, zero third-party SDKs. |
+| **M2B Discovery, Reconciliation & Review Digest** | Implemented & offline-tested | `src/onemind/discovery/`, `cli.py` (`discover`, `reconcile`, `review-digest`), `examples/discovery-gold-corpus/`, `examples/discovery-heldout-corpus/` | Deterministic zero-LLM `DeterministicReviewExtractor` (+ optional `OptionalModelExtractor` interface); independent-PR occurrence counting (deduping repeated comments & superseded edits); scope/polarity-aware clustering that never merges contradictions; 6-way scope-aware reconciliation emitting valid inert `Conflict` records with strict non-interference; read-only Markdown review digest; synthetic gold + independent held-out corpus precision/recall evaluation. |
 
 ---
 
-## Known Limitations (M0 + M1 + M2A)
+## Known Limitations (M0 + M1 + M2A + M2B)
 
-- **No live GitHub API / cryptographic merge proof verification:** `DefaultAuthorityVerifier` validates proof shape and policy membership locally; live verification against GitHub branch protection and commit reviews is deferred to M2B.
+- **No live GitHub API / cryptographic merge proof verification:** `DefaultAuthorityVerifier` validates proof shape and policy membership locally; live verification against GitHub branch protection and commit reviews is deferred to M2C.
+- **Deterministic lexical extractor scope:** `DeterministicReviewExtractor` relies on transparent lexical/structural rules over opted-in redacted text; subtle semantic equivalences or implicit contextual exceptions still require human review (or a future opt-in `OptionalModelExtractor`).
 - **Regex redaction is best-effort:** In explicit `--capture-policy redacted-excerpt` mode, heuristic secret/PII redaction cannot guarantee 100% removal of domain-specific secrets or contextual PII; `metadata-only` remains the safe default.
 - **Automated suite is offline-only:** Live GitHub API requests are intentionally excluded from automated tests (socket-guarded) and exercised only when explicitly invoked by a user without `--fixture-file`.
 - **Trusted base must be supplied externally:** `onemind validate` without `--trusted-base <commit-or-ref>` validates internal consistency of the current snapshot (including `IngestionRun` manifests) and explicitly reports historical mutation verification as `unavailable`.
 - **Single-repository trust domain:** Multi-repo federation, enterprise IAM/SSO, HTTP/MCP transports, and hosted services are intentionally out of scope.
-- **No empirical effectiveness claims:** Demo fixtures and historical GitHub observations are inert evidence only and do not measure real-world engineering improvement.
+- **No empirical effectiveness claims:** Demo fixtures, synthetic gold/held-out corpus metrics, and historical GitHub observations do **not** measure real-world engineering improvement.
 
 ---
 
-## Explicitly Deferred to M2B+
+## Explicitly Deferred to M2C / M2D
 
-See [`docs/M2_BLOCKERS.md`](M2_BLOCKERS.md) for the eight remaining prerequisites blocking M2B/M2C (verified reviewer/protected-merge proofs, fork-safe Actions privilege separation, held-out detector evaluation, immutable pilot outcome collection, persistent assignment, silent control-arm isolation, statistical preregistration, and privacy/retention policy).
+See [`docs/M2_BLOCKERS.md`](M2_BLOCKERS.md) for the remaining prerequisites blocking M2C (verified GitHub governance proofs, fork-safe privileged publisher separation, advisory PR preflight, held-out detector validation) and M2D (immutable pilot outcome collection, persistent assignment, silent control-arm isolation, statistical preregistration, and privacy/retention policy).
